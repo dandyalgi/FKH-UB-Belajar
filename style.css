@@ -277,3 +277,7 @@ button.option.selected .letter, button.option.selected .mark { color: var(--acce
 .check-list { max-height: 220px; overflow-y: auto; display: grid; gap: 0 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); padding-top: 4px; }
 .check-list .inline-check { margin: 5px 0; align-items: flex-start; }
 .check-list .inline-check input { margin-top: 3px; }
+
+.hist-list { list-style: none; margin: 0; padding: 0; }
+.hist-item { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; justify-content: space-between; padding: .6rem 0; border-top: 1px solid var(--border, #ddd); }
+.hist-item:first-child { border-top: 0; }

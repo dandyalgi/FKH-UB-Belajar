@@ -15,6 +15,7 @@
     key: 'quiz.key.v1',           // derived decryption key (base64); kept for this tab only (sessionStorage)
     custom: 'quiz.custom.v1',     // questions imported in this browser
     edits: 'quiz.edits.v1',       // answer-key edits made in this browser
+    history: 'quiz.history.v1',   // [{ t, ids, a }] completed exams, newest last
   });
   const STATUS_LABEL = Object.freeze({
     correct: 'Correct',
@@ -171,8 +172,9 @@
   const inSet = (set, v) => set === null || set.has(v);
 
   /** scope = { cats, srcs }: each is null (everything) or a Set of selected values. */
-  function examPool(questions, progress, scope, includeAi = true) {
+  function examPool(questions, progress, scope, includeAi = true, includeCorrect = false) {
     const inScope = questions.filter((q) => inSet(scope.cats, q.category) && inSet(scope.srcs, q.source) && (includeAi || !q.aiGenerated));
+    if (includeCorrect) return { pool: inScope, repeat: false };
     const fresh = inScope.filter((q) => progress[q.id] !== 'correct');
     if (fresh.length || !inScope.length) return { pool: fresh, repeat: false };
     return { pool: inScope, repeat: true };
@@ -238,6 +240,8 @@
     progress: Object.create(null),
     session: null,
     includeAi: true,
+    includeCorrect: false,
+    history: [],
     key: null,                  // CryptoKey once logged in
     env: null,                  // envelope of the loaded bank (salt, iterations)
     scope: { cats: null, srcs: null }, // exam setup selection; null = everything
@@ -293,6 +297,21 @@
   function saveSession() {
     if (state.session) storage.write(KEYS.session, state.session);
     else storage.remove(KEYS.session);
+  }
+
+  const HISTORY_MAX = 200;
+  const saveHistory = () => storage.write(KEYS.history, state.history);
+  function loadHistory() {
+    const raw = storage.read(KEYS.history, []);
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const e of raw) {
+      if (!e || typeof e !== 'object' || !Array.isArray(e.ids) || !Array.isArray(e.a)) continue;
+      if (!Number.isFinite(e.t) || !e.ids.length || e.ids.length !== e.a.length) continue;
+      if (!e.ids.every((id) => typeof id === 'string') || !e.a.every((x) => Number.isInteger(x))) continue;
+      out.push({ t: e.t, ids: e.ids, a: e.a });
+    }
+    return out.slice(-HISTORY_MAX);
   }
 
   function loadProgress() {
@@ -411,6 +430,7 @@
       pruneEdits();
       state.progress = loadProgress();
       state.session = loadSession();
+      state.history = loadHistory();
       state.ui = freshUi();
 
       if (!state.session) transition('SETUP');
@@ -425,8 +445,8 @@
   }
 
   /* ---- actions ---- */
-  function startTest(scope, count, includeAi) {
-    const { pool } = examPool(state.questions, state.progress, scope, includeAi);
+  function startTest(scope, count, includeAi, includeCorrect) {
+    const { pool } = examPool(state.questions, state.progress, scope, includeAi, includeCorrect);
     if (!pool.length) return;
     const n = Math.max(1, Math.min(count, pool.length));
     const ids = balancedDraw(pool, n).map((q) => q.id);
@@ -434,6 +454,17 @@
     saveSession();
     transition('ACTIVE');
     render();
+  }
+
+  /** Start an exam from a fixed list of question ids (retake). Returns how many ids were skipped. */
+  function startFromIds(rawIds) {
+    const ids = rawIds.filter((id) => state.byId.has(id));
+    if (!ids.length) return -1;
+    state.session = { ids, index: 0, answers: Object.create(null), marked: Object.create(null), submitted: false };
+    saveSession();
+    transition('ACTIVE');
+    render();
+    return rawIds.length - ids.length;
   }
 
   function currentQuestion() {
@@ -478,6 +509,12 @@
       state.progress[id] = choice === state.byId.get(id).correctIndex ? 'correct' : 'incorrect';
     }
     s.submitted = true;
+    const answered = s.ids.filter((id) => s.answers[id] !== undefined);
+    if (answered.length) {
+      state.history.push({ t: Date.now(), ids: answered, a: answered.map((id) => s.answers[id]) });
+      if (state.history.length > HISTORY_MAX) state.history = state.history.slice(-HISTORY_MAX);
+      saveHistory();
+    }
     saveProgress();
     saveSession();
     transition('RESULTS');
@@ -490,6 +527,14 @@
     state.ui = freshUi();
     transition('SETUP');
     render();
+  }
+
+  function retakeFromResults() {
+    const ids = state.session.ids.slice();
+    state.session = null;
+    state.ui = freshUi();
+    transition('SETUP');
+    startFromIds(ids);
   }
 
   function resetProgress() {
@@ -862,12 +907,13 @@
     const sources = sortedUnique(state.questions.map((q) => q.source));
     const count = h('input', { id: 'count', type: 'number', min: '1', step: '1', inputmode: 'numeric' });
     const aiBox = h('input', { id: 'include-ai', type: 'checkbox', checked: state.includeAi });
+    const corBox = h('input', { id: 'include-correct', type: 'checkbox', checked: state.includeCorrect });
     const info = h('p', { class: 'muted', id: 'pool-info' });
     const start = h('button', { class: 'btn primary', type: 'submit', id: 'start', text: 'Start test' });
 
     const avail = (sc) => state.questions.filter((q) => inSet(sc.cats, q.category) && inSet(sc.srcs, q.source)
-      && (aiBox.checked || !q.aiGenerated) && state.progress[q.id] !== 'correct').length;
-    const tag = (n) => (n ? `${n} available` : 'none new');
+      && (aiBox.checked || !q.aiGenerated) && (corBox.checked || state.progress[q.id] !== 'correct')).length;
+    const tag = (n) => (n ? `${n} available` : (corBox.checked ? 'none' : 'none new'));
 
     const catGroup = multiCheck('x-cat', 'Categories',
       stats.categories.map((c) => ({ value: c.category, label: () => `${c.category} (${tag(avail({ cats: new Set([c.category]), srcs: scope.srcs }))})` })),
@@ -878,9 +924,10 @@
 
     const sync = () => {
       state.includeAi = aiBox.checked;
+      state.includeCorrect = corBox.checked;
       catGroup.refresh();
       srcGroup.refresh();
-      const { pool, repeat } = examPool(state.questions, state.progress, scope, aiBox.checked);
+      const { pool, repeat } = examPool(state.questions, state.progress, scope, aiBox.checked, corBox.checked);
       count.max = String(pool.length);
       const cur = parseInt(count.value, 10);
       if (!Number.isInteger(cur) || cur < 1 || cur > pool.length) {
@@ -889,9 +936,11 @@
       count.disabled = start.disabled = pool.length === 0;
       if (!pool.length) info.textContent = 'No questions in this selection. Tick at least one category and one source.';
       else if (repeat) info.textContent = `Everything here is already answered correctly. A new test will repeat ${pool.length} question(s) for practice.`;
+      else if (corBox.checked) info.textContent = `${pool.length} question(s) available, including ones already answered correctly.`;
       else info.textContent = `${pool.length} question(s) available: not attempted yet or answered incorrectly.`;
     };
     aiBox.addEventListener('change', guard(sync));
+    corBox.addEventListener('change', guard(sync));
     sync();
 
     return h('form', {
@@ -899,10 +948,10 @@
       on: {
         submit: (e) => {
           e.preventDefault();
-          const { pool } = examPool(state.questions, state.progress, scope, aiBox.checked);
+          const { pool } = examPool(state.questions, state.progress, scope, aiBox.checked, corBox.checked);
           const n = parseInt(count.value, 10);
           if (!pool.length) return;
-          startTest(scope, Number.isInteger(n) ? n : Math.min(DEFAULT_COUNT, pool.length), aiBox.checked);
+          startTest(scope, Number.isInteger(n) ? n : Math.min(DEFAULT_COUNT, pool.length), aiBox.checked, corBox.checked);
         },
       },
     },
@@ -911,6 +960,7 @@
       srcGroup.node,
       h('label', { for: 'count', text: 'Number of questions' }), count,
       h('label', { class: 'inline-check', for: 'include-ai' }, aiBox, 'Include AI-generated questions and answers'),
+      h('label', { class: 'inline-check', for: 'include-correct' }, corBox, 'Include questions already answered correctly'),
       info,
       h('div', { class: 'form-actions' }, start)
     );
@@ -919,6 +969,7 @@
   function viewSetup() {
     if (state.ui.panel === 'manage') return viewManage();
     if (state.ui.panel === 'browse') return viewBrowse();
+    if (state.ui.panel === 'history') return viewHistory();
     const stats = computeStats(state.questions, state.progress);
     const t = stats.total;
     const nodes = [];
@@ -947,6 +998,10 @@
       h('button', {
         class: 'btn', type: 'button', id: 'browse', text: 'Browse all questions',
         on: { click: () => { state.ui = freshUi('browse'); render(); } },
+      }),
+      h('button', {
+        class: 'btn', type: 'button', id: 'history-btn', text: `History (${state.history.length})`,
+        on: { click: () => { state.ui = freshUi('history'); render(); } },
       }),
       h('button', {
         class: 'btn', type: 'button', id: 'manage', text: 'Import / export',
@@ -1341,6 +1396,76 @@
         h('label', { class: 'inline-check group-check', for: `rv-${key}-reveal` }, box, 'Show answers & explanation')));
   }
 
+  function reviewSection(ids, answers, hideUnanswered = false) {
+    const items = ids.map((id) => state.byId.get(id)).filter(Boolean);
+    const rank = (q) => (answers[q.id] === undefined ? 1 : answers[q.id] === q.correctIndex ? 2 : 0);
+    const ordered = items
+      .map((q, i) => ({ q, i }))
+      .sort((a, b) => rank(a.q) - rank(b.q) || a.i - b.i)
+      .map((x) => x.q);
+    return h('section', {},
+      h('h2', { text: `Review all ${items.length} questions` }),
+      h('p', { class: 'muted', text: 'Open a group to see its questions. Tick the box next to it to show the correct answers and explanations.' }),
+      reviewGroup('incorrect', 'Answered incorrectly', ordered.filter((q) => rank(q) === 0), answers, ids),
+      reviewGroup('correct', 'Answered correctly', ordered.filter((q) => rank(q) === 2), answers, ids),
+      !hideUnanswered && reviewGroup('unanswered', 'Unanswered', ordered.filter((q) => rank(q) === 1), answers, ids));
+  }
+
+  function histScore(e) {
+    let correct = 0; let known = 0;
+    e.ids.forEach((id, i) => {
+      const q = state.byId.get(id);
+      if (!q) return;
+      known++;
+      if (e.a[i] === q.correctIndex) correct++;
+    });
+    return { correct, known };
+  }
+
+  function viewHistory() {
+    const back = backButton();
+    const sel = state.ui.histIndex;
+    if (Number.isInteger(sel) && state.history[sel]) {
+      const e = state.history[sel];
+      const answers = Object.create(null);
+      e.ids.forEach((id, i) => { if (e.a[i] >= 0) answers[id] = e.a[i]; });
+      const { correct, known } = histScore(e);
+      return [
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', type: 'button', id: 'hist-back', text: '← History',
+            on: { click: () => { state.ui.histIndex = null; render(); } } })),
+        h('section', { class: 'card' },
+          h('h2', { text: new Date(e.t).toLocaleString() }),
+          h('p', { class: 'big', id: 'hist-score', text: `${correct} / ${known} correct (${pct(correct, known)}%)` }),
+          known < e.ids.length && h('p', { class: 'muted', text: `${e.ids.length - known} question(s) no longer exist in the bank.` }),
+          h('div', { class: 'form-actions' },
+            h('button', { class: 'btn primary', type: 'button', id: 'hist-retake', text: 'Retake same questions',
+              on: { click: () => startFromIds(e.ids) } }))),
+        reviewSection(e.ids, answers, true),
+      ];
+    }
+    const rows = state.history.map((e, i) => ({ e, i })).reverse().map(({ e, i }) => {
+      const { correct, known } = histScore(e);
+      return h('li', { class: 'hist-item' },
+        h('div', {},
+          h('strong', { text: new Date(e.t).toLocaleString() }),
+          h('span', { class: 'muted', text: ` · ${correct} / ${known} correct (${pct(correct, known)}%)` })),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', type: 'button', text: 'Details', on: { click: () => { state.ui.histIndex = i; render(); } } }),
+          h('button', { class: 'btn primary', type: 'button', text: 'Retake', on: { click: () => startFromIds(e.ids) } })));
+    });
+    return [
+      back,
+      h('section', { class: 'card', id: 'history' },
+        h('h2', { text: 'Exam history' }),
+        h('p', { class: 'muted', text: `Last ${HISTORY_MAX} completed exams are kept in this browser; only answered questions are saved. Scores use the current answer keys.` }),
+        h('ul', { class: 'hist-list' }, rows.length ? rows : [h('li', { class: 'muted', text: 'No completed exams yet.' })]),
+        state.history.length ? h('div', { class: 'form-actions' },
+          h('button', { class: 'btn danger', type: 'button', id: 'hist-clear', text: 'Clear history',
+            on: { click: () => { if (window.confirm('Delete all exam history? Progress is not affected.')) { state.history = []; saveHistory(); render(); } } } })) : null),
+    ];
+  }
+
   function viewResults() {
     const { ids, answers } = state.session;
     const items = ids.map((id) => state.byId.get(id));
@@ -1360,15 +1485,10 @@
         h('p', { class: 'muted', id: 'score-detail',
           text: `${wrong} incorrect${skipped ? `, ${skipped} unanswered` : ''}. Incorrect questions stay in the pool for your next tests.${skipped ? ' Unanswered questions keep their previous status.' : ''}` }),
         h('div', { class: 'form-actions' },
-          h('button', { class: 'btn primary', type: 'button', id: 'done', text: 'Back to menu', on: { click: leaveTest } }))
+          h('button', { class: 'btn primary', type: 'button', id: 'done', text: 'Back to menu', on: { click: leaveTest } }),
+          h('button', { class: 'btn', type: 'button', id: 'retake', text: 'Retake same questions', on: { click: retakeFromResults } }))
       ),
-      h('section', {},
-        h('h2', { text: `Review all ${items.length} questions` }),
-        h('p', { class: 'muted', text: 'Open a group to see its questions. Tick the box next to it to show the correct answers and explanations.' }),
-        reviewGroup('incorrect', 'Answered incorrectly', ordered.filter((q) => rank(q) === 0), answers, ids),
-        reviewGroup('correct', 'Answered correctly', ordered.filter((q) => rank(q) === 2), answers, ids),
-        reviewGroup('unanswered', 'Unanswered', ordered.filter((q) => rank(q) === 1), answers, ids)
-      ),
+      reviewSection(ids, answers),
     ];
   }
 
