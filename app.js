@@ -15,7 +15,8 @@
       'Source names: "Sigap" is now "External 1" (batch numbers unchanged).',
       'The question code (for example q12) is shown next to the category and source.',
       'Added this changelog to the main menu.',
-      'After login you enter your name once; the main menu shows how many participants have used Quiz Time.' ] },
+      'After login you enter your name and university once; the main menu shows how many participants have used Quiz Time.',
+      'All menus are now in English.' ] },
     { date: '2026-11-04', items: [
       'New checkbox when starting a test: include questions already answered correctly.',
       'Exam history: see every finished exam (answered questions only) and retake the same questions.',
@@ -341,7 +342,7 @@
   function loadUser() {
     const raw = storage.read(KEYS.user, null);
     if (!raw || typeof raw.id !== 'string' || typeof raw.name !== 'string' || !raw.name.trim()) return null;
-    return { id: raw.id, name: raw.name.trim().slice(0, 60) };
+    return { id: raw.id, name: raw.name.trim().slice(0, 60), university: typeof raw.university === 'string' ? raw.university.trim().slice(0, 80) : '' };
   }
   function newDeviceId() {
     try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (_) { /* fall through */ }
@@ -361,7 +362,7 @@
     /** Upsert this participant (also counts a visit). Never blocks the app; failures are retried on the next start. */
     async sync() {
       if (!state.user) return;
-      const data = await this.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ id: state.user.id, name: state.user.name }) });
+      const data = await this.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ id: state.user.id, name: state.user.name, university: state.user.university || '' }) });
       if (data && Number.isInteger(data.count)) setParticipants(data.count);
     },
     async count() {
@@ -1055,8 +1056,8 @@
       h('p', { class: 'big', text: `${t.correct} of ${t.total} answered correctly (${pct(t.correct, t.total)}%)` }),
       stackedBar(t),
       legend(t),
-      h('p', { class: 'muted', id: 'user-line' }, state.user ? `Signed in as ${state.user.name}. ` : '',
-        h('button', { class: 'linkbtn', type: 'button', id: 'change-name', text: 'Change name', on: { click: () => showNamePage(() => { render(); }) } })),
+      h('p', { class: 'muted', id: 'user-line' }, state.user ? `Signed in as ${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}. ` : '',
+        h('button', { class: 'linkbtn', type: 'button', id: 'change-name', text: 'Change name / university', on: { click: () => showNamePage(() => { render(); }) } })),
       h('p', { class: 'muted', id: 'participants', text: participantsText() })
     ));
     nodes.push(categoryTable(stats.categories));
@@ -1610,36 +1611,42 @@
     registry.count();
   }
 
+  const UNIVERSITIES = ['IPB', 'UB', 'UGM', 'UNAIR', 'UNDANA', 'UNHAS', 'UNPAD', 'UNUD', 'USK', 'Other'];
   function viewName(done, canCancel) {
     const err = h('p', { class: 'notice err', role: 'alert', hidden: true });
     const name = h('input', { id: 'user-name', type: 'text', maxlength: '60', autocomplete: 'name', value: state.user ? state.user.name : '' });
+    const uni = h('input', { id: 'user-uni', type: 'text', maxlength: '80', list: 'uni-list', autocomplete: 'organization', value: state.user ? state.user.university || '' : '' });
+    const list = h('datalist', { id: 'uni-list' }, UNIVERSITIES.map((u) => h('option', { value: u })));
     const count = h('p', { class: 'muted', id: 'participants', text: participantsText() });
-    const btn = h('button', { class: 'btn primary', type: 'submit', id: 'name-btn', text: 'Lanjut' });
+    const btn = h('button', { class: 'btn primary', type: 'submit', id: 'name-btn', text: 'Continue' });
     return h('form', {
       class: 'card', id: 'name-form', novalidate: true,
       on: {
         submit: (e) => {
           e.preventDefault();
           const v = name.value.replace(/\s+/g, ' ').trim();
-          if (v.length < 2) { err.hidden = false; err.textContent = 'Tulis nama kamu (minimal 2 huruf).'; name.focus(); return; }
-          state.user = { id: state.user ? state.user.id : newDeviceId(), name: v.slice(0, 60) };
+          const u = uni.value.replace(/\s+/g, ' ').trim();
+          if (v.length < 2) { err.hidden = false; err.textContent = 'Enter your name (at least 2 characters).'; name.focus(); return; }
+          if (u.length < 2) { err.hidden = false; err.textContent = 'Enter your university (at least 2 characters).'; uni.focus(); return; }
+          state.user = { id: state.user ? state.user.id : newDeviceId(), name: v.slice(0, 60), university: u.slice(0, 80) };
           storage.write(KEYS.user, state.user);
           done();
         },
       },
     },
-      h('h2', { text: 'Siapa namamu?' }),
-      h('p', { class: 'muted', text: 'Nama kamu dicatat supaya admin tahu siapa saja yang sudah memakai Quiz Time.' }),
-      h('label', { for: 'user-name', text: 'Nama' }), name,
+      h('h2', { text: 'Who are you?' }),
+      h('p', { class: 'muted', text: 'Your name and university are recorded so the admin knows who has used Quiz Time.' }),
+      h('label', { for: 'user-name', text: 'Name' }), name,
+      h('label', { for: 'user-uni', text: 'University' }), uni, list,
       err,
-      h('div', { class: 'form-actions' }, btn, canCancel && h('button', { class: 'btn', type: 'button', id: 'name-cancel', text: 'Batal', on: { click: () => render() } })),
+      h('div', { class: 'form-actions' }, btn, canCancel && h('button', { class: 'btn', type: 'button', id: 'name-cancel', text: 'Cancel', on: { click: () => render() } })),
       count);
   }
 
   /** After a successful login: ask for a name once per browser, then start. */
   function proceed() {
     state.user = loadUser();
-    if (state.user) boot(); else showNamePage(boot);
+    if (state.user && state.user.university) boot(); else showNamePage(boot);
   }
 
   function showLogin() {
@@ -1653,8 +1660,8 @@
     const err = h('p', { class: 'notice err', role: 'alert', hidden: true });
     const id = h('input', { id: 'login-id', type: 'text', autocomplete: 'username', autocapitalize: 'none', spellcheck: 'false' });
     const pw = h('input', { id: 'login-pw', type: 'password', autocomplete: 'current-password' });
-    const btn = h('button', { class: 'btn primary', type: 'submit', id: 'login-btn', text: 'Masuk' });
-    const fail = (msg) => { err.hidden = false; err.textContent = msg; pw.value = ''; btn.disabled = false; btn.textContent = 'Masuk'; pw.focus(); };
+    const btn = h('button', { class: 'btn primary', type: 'submit', id: 'login-btn', text: 'Log in' });
+    const fail = (msg) => { err.hidden = false; err.textContent = msg; pw.value = ''; btn.disabled = false; btn.textContent = 'Log in'; pw.focus(); };
     return [h('form', {
       class: 'card', id: 'login-form', novalidate: true,
       on: {
@@ -1662,7 +1669,7 @@
           e.preventDefault();
           err.hidden = true;
           btn.disabled = true;
-          btn.textContent = 'Memeriksa…';
+          btn.textContent = 'Checking…';
           try {
             const env = await fetchEnvelope();
             const key = await deriveKey(id.value, pw.value, env);
@@ -1671,8 +1678,8 @@
             sess.set(b64e(new Uint8Array(await crypto.subtle.exportKey('raw', key))));
             proceed();
           } catch (ex) {
-            if (ex instanceof AuthError) fail('ID atau password salah.');
-            else fail(ex instanceof DataError ? ex.message : 'Terjadi kesalahan. Coba lagi.');
+            if (ex instanceof AuthError) fail('Wrong ID or password.');
+            else fail(ex instanceof DataError ? ex.message : 'Something went wrong. Please try again.');
           }
         },
       },
@@ -1682,7 +1689,7 @@
       h('label', { for: 'login-pw', text: 'Password' }), pw,
       err,
       h('div', { class: 'form-actions' }, btn),
-      h('p', { class: 'muted thanks', text: 'Terima kasih kepada: Allah SWT, Claude AI, dan seluruh bank soal yang masuk ke chat saya.' })
+      h('p', { class: 'muted thanks', text: 'Thanks to: Allah SWT, Claude AI, and every question bank that went into my chat.' })
     )];
   }
 
