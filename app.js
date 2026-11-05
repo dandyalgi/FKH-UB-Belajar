@@ -7,6 +7,26 @@
   const BANK_URL = 'bank.enc'; // AES-GCM encrypted question bank (see encrypt-bank.js)
   const FETCH_TIMEOUT_MS = 10000;
   const DEFAULT_COUNT = 10;
+  /** Google Apps Script web-app URL that stores participant names (see config.js). Empty = names stay on this device only. */
+  const REGISTRY_URL = String((window.QUIZ_CONFIG && window.QUIZ_CONFIG.registryUrl) || '');
+  /** Newest first. Add an entry here whenever the app changes. */
+  const CHANGELOG = [
+    { date: '2026-11-05', items: [
+      'Source names: "Sigap" is now "External 1" (batch numbers unchanged).',
+      'The question code (for example q12) is shown next to the category and source.',
+      'Added this changelog to the main menu.',
+      'After login you enter your name once; the main menu shows how many participants have used Quiz Time.' ] },
+    { date: '2026-11-04', items: [
+      'New checkbox when starting a test: include questions already answered correctly.',
+      'Exam history: see every finished exam (answered questions only) and retake the same questions.',
+      'Login now lasts for the current tab only; use Import / export to back up or move your progress.' ] },
+    { date: 'Earlier', items: [
+      'Question bank is encrypted and needs the ID and password.',
+      'Category and source selection with checkboxes, in the test form and in Browse.',
+      'Review after a test is grouped (incorrect, correct, unanswered) with an option to show answers and explanations.',
+      'Option to include AI-generated questions and answers.',
+      'Typos and broken options in the bank were fixed.' ] },
+  ];
   const MAX_OPTIONS = 5; // A to E
   const ALL = '__all__';
   const KEYS = Object.freeze({
@@ -14,6 +34,7 @@
     session: 'quiz.session.v1',   // { ids: string[], index: number, answers: { [id]: number } }
     key: 'quiz.key.v1',           // derived decryption key (base64); kept for this tab only (sessionStorage)
     custom: 'quiz.custom.v1',     // questions imported in this browser
+    user: 'quiz.user.v1',         // { id, name } of the participant on this browser
     edits: 'quiz.edits.v1',       // answer-key edits made in this browser
     history: 'quiz.history.v1',   // [{ t, ids, a }] completed exams, newest last
   });
@@ -94,8 +115,8 @@
   const isText = (v) => typeof v === 'string' && v.trim() !== '';
   const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
   const letter = (i) => String.fromCharCode(65 + i);
-  /** "Category · Source", where Source is "-" when the question has none. */
-  const labelOf = (q) => `${q.category} · ${q.source}`;
+  /** "Category · Source · code", where Source is "-" when the question has none. */
+  const labelOf = (q) => `${q.category} · ${q.source} · ${q.id}`;
 
   function shuffle(arr) {
     const a = arr.slice();
@@ -247,6 +268,8 @@
     scope: { cats: null, srcs: null }, // exam setup selection; null = everything
     error: null,
     ui: freshUi(),
+    user: null,                 // { id, name }
+    participants: null,         // number of participants, when the registry is configured
   };
 
   function transition(to) {
@@ -313,6 +336,46 @@
     }
     return out.slice(-HISTORY_MAX);
   }
+
+  /* ---- participants (name + count, stored in a Google Sheet through an Apps Script web app) ---- */
+  function loadUser() {
+    const raw = storage.read(KEYS.user, null);
+    if (!raw || typeof raw.id !== 'string' || typeof raw.name !== 'string' || !raw.name.trim()) return null;
+    return { id: raw.id, name: raw.name.trim().slice(0, 60) };
+  }
+  function newDeviceId() {
+    try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (_) { /* fall through */ }
+    return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  const registry = {
+    async call(init) {
+      if (!REGISTRY_URL) return null;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const res = await fetch(REGISTRY_URL, { ...init, signal: ctrl.signal, redirect: 'follow' });
+        const data = await res.json();
+        return data && data.ok ? data : null;
+      } catch (_) { return null; } finally { clearTimeout(timer); }
+    },
+    /** Upsert this participant (also counts a visit). Never blocks the app; failures are retried on the next start. */
+    async sync() {
+      if (!state.user) return;
+      const data = await this.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ id: state.user.id, name: state.user.name }) });
+      if (data && Number.isInteger(data.count)) setParticipants(data.count);
+    },
+    async count() {
+      const data = await this.call({ method: 'GET' });
+      if (data && Number.isInteger(data.count)) setParticipants(data.count);
+      return data ? data.count : null;
+    },
+  };
+  function setParticipants(n) {
+    state.participants = n;
+    const el = document.getElementById('participants');
+    if (el) el.textContent = participantsText();
+  }
+  const participantsText = () => (state.participants === null ? '' : `${state.participants} participant${state.participants === 1 ? ' has' : 's have'} used Quiz Time.`);
 
   function loadProgress() {
     const raw = storage.read(KEYS.progress, {});
@@ -430,6 +493,7 @@
       pruneEdits();
       state.progress = loadProgress();
       state.session = loadSession();
+      registry.sync();
       state.history = loadHistory();
       state.ui = freshUi();
 
@@ -990,7 +1054,10 @@
       h('h2', { text: 'Your progress' }),
       h('p', { class: 'big', text: `${t.correct} of ${t.total} answered correctly (${pct(t.correct, t.total)}%)` }),
       stackedBar(t),
-      legend(t)
+      legend(t),
+      h('p', { class: 'muted', id: 'user-line' }, state.user ? `Signed in as ${state.user.name}. ` : '',
+        h('button', { class: 'linkbtn', type: 'button', id: 'change-name', text: 'Change name', on: { click: () => showNamePage(() => { render(); }) } })),
+      h('p', { class: 'muted', id: 'participants', text: participantsText() })
     ));
     nodes.push(categoryTable(stats.categories));
     nodes.push(testForm(stats));
@@ -1017,7 +1084,17 @@
       })
     ));
     nodes.push(backupCard());
+    nodes.push(changelogCard());
     return nodes;
+  }
+
+  function changelogCard() {
+    return h('section', { class: 'card', id: 'changelog' },
+      h('details', {},
+        h('summary', { text: `Changelog (latest: ${CHANGELOG[0].date})` }),
+        CHANGELOG.map((e) => h('div', { class: 'cl-entry' },
+          h('h3', { text: e.date }),
+          h('ul', {}, e.items.map((t) => h('li', { text: t })))))));
   }
 
   function backupCard() {
@@ -1128,7 +1205,7 @@
       const s = state.progress[q.id] || 'unattempted';
       const li = h('li', { class: `review-item${s === 'incorrect' ? ' wrong' : ''}` },
         h('div', { class: 'q-head' },
-          h('span', { text: `${q.id} · ${labelOf(q)}` }),
+          h('span', { text: labelOf(q) }),
           h('span', { class: 'badges' },
             state.edits[q.id] && h('span', { class: 'badge edited', text: 'Edited' }),
             statusBadge(s))
@@ -1528,6 +1605,43 @@
     );
   }
 
+  function showNamePage(done) {
+    mount([viewName(done, state.machine === 'SETUP')]);
+    registry.count();
+  }
+
+  function viewName(done, canCancel) {
+    const err = h('p', { class: 'notice err', role: 'alert', hidden: true });
+    const name = h('input', { id: 'user-name', type: 'text', maxlength: '60', autocomplete: 'name', value: state.user ? state.user.name : '' });
+    const count = h('p', { class: 'muted', id: 'participants', text: participantsText() });
+    const btn = h('button', { class: 'btn primary', type: 'submit', id: 'name-btn', text: 'Lanjut' });
+    return h('form', {
+      class: 'card', id: 'name-form', novalidate: true,
+      on: {
+        submit: (e) => {
+          e.preventDefault();
+          const v = name.value.replace(/\s+/g, ' ').trim();
+          if (v.length < 2) { err.hidden = false; err.textContent = 'Tulis nama kamu (minimal 2 huruf).'; name.focus(); return; }
+          state.user = { id: state.user ? state.user.id : newDeviceId(), name: v.slice(0, 60) };
+          storage.write(KEYS.user, state.user);
+          done();
+        },
+      },
+    },
+      h('h2', { text: 'Siapa namamu?' }),
+      h('p', { class: 'muted', text: 'Nama kamu dicatat supaya admin tahu siapa saja yang sudah memakai Quiz Time.' }),
+      h('label', { for: 'user-name', text: 'Nama' }), name,
+      err,
+      h('div', { class: 'form-actions' }, btn, canCancel && h('button', { class: 'btn', type: 'button', id: 'name-cancel', text: 'Batal', on: { click: () => render() } })),
+      count);
+  }
+
+  /** After a successful login: ask for a name once per browser, then start. */
+  function proceed() {
+    state.user = loadUser();
+    if (state.user) boot(); else showNamePage(boot);
+  }
+
   function showLogin() {
     state.key = null;
     sess.clear();
@@ -1555,7 +1669,7 @@
             await decryptBank(env, key); // throws AuthError when the ID/password is wrong
             state.key = key;
             sess.set(b64e(new Uint8Array(await crypto.subtle.exportKey('raw', key))));
-            boot();
+            proceed();
           } catch (ex) {
             if (ex instanceof AuthError) fail('ID atau password salah.');
             else fail(ex instanceof DataError ? ex.message : 'Terjadi kesalahan. Coba lagi.');
@@ -1575,7 +1689,7 @@
   (async () => {
     const saved = sess.get();
     if (saved) {
-      try { state.key = await importKey(saved); boot(); return; }
+      try { state.key = await importKey(saved); proceed(); return; }
       catch (_) { sess.clear(); }
     }
     mount(viewLogin());
