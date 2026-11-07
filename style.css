@@ -288,3 +288,10 @@ button.option.selected .letter, button.option.selected .mark { color: var(--acce
 
 /* name page, participants */
 .linkbtn { font: inherit; background: none; border: 0; padding: 0; color: var(--accent, #2563eb); text-decoration: underline; cursor: pointer; }
+
+.report-box { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.report-box h3 { margin: 0 0 4px; font-size: 1rem; }
+.howto h3 { margin: 14px 0 4px; font-size: 1rem; }
+.howto ol, .howto ul { margin: 6px 0; padding-left: 22px; }
+.howto li { margin: 4px 0; }
+[hidden] { display: none !important; }

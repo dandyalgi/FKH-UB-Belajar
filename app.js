@@ -11,6 +11,9 @@
   const REGISTRY_URL = String((window.QUIZ_CONFIG && window.QUIZ_CONFIG.registryUrl) || '');
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
+    { date: '2026-11-07', items: [
+      'Report a question: next to "Mark for review" there is now a "Report" button (incorrect question, answer choices, answer key, explanation, category, or other, plus an optional comment). Reports go to the admin\'s Google Sheet.',
+      'New "How Quiz Time works" card on the main menu: the workflow, where your data is stored, and how to move your progress to another device.' ] },
     { date: '2026-11-05', items: [
       'Source names: "Sigap" is now "External 1" (batch numbers unchanged).',
       'The question code (for example q12) is shown next to the category and source.',
@@ -511,6 +514,7 @@
 
   /* ---- actions ---- */
   function startTest(scope, count, includeAi, includeCorrect) {
+    resetReport();
     const { pool } = examPool(state.questions, state.progress, scope, includeAi, includeCorrect);
     if (!pool.length) return;
     const n = Math.max(1, Math.min(count, pool.length));
@@ -523,6 +527,7 @@
 
   /** Start an exam from a fixed list of question ids (retake). Returns how many ids were skipped. */
   function startFromIds(rawIds) {
+    resetReport();
     const ids = rawIds.filter((id) => state.byId.has(id));
     if (!ids.length) return -1;
     state.session = { ids, index: 0, answers: Object.create(null), marked: Object.create(null), submitted: false };
@@ -567,6 +572,7 @@
 
   /** Grades the exam. Only answered questions change status; unanswered ones keep theirs. */
   function submitExam() {
+    resetReport();
     const s = state.session;
     for (const id of s.ids) {
       const choice = s.answers[id];
@@ -587,6 +593,7 @@
   }
 
   function leaveTest() {
+    resetReport();
     state.session = null;
     saveSession();
     state.ui = freshUi();
@@ -670,6 +677,53 @@
       message: `Restored progress for ${restored} question(s)${skipped ? `; ${skipped} entr${skipped === 1 ? 'y' : 'ies'} skipped (question no longer in the bank)` : ''}.`
         + (storage.available ? '' : ' Warning: browser storage is unavailable, so this will be lost on refresh.'),
     };
+  }
+
+  /* ---- report a question (sent to the Google Sheet through the same Apps Script) ---- */
+  const REPORT_TYPES = ['Incorrect question', 'Incorrect answer choices', 'Incorrect answer key', 'Incorrect explanation', 'Incorrect category', 'Other'];
+  const reportDraft = { id: null, open: false, types: new Set(), comment: '', sending: false, msg: null };
+  const reportedIds = new Set(); // questions reported during this visit
+  function resetReport() { reportDraft.id = null; reportDraft.open = false; reportDraft.types.clear(); reportDraft.comment = ''; reportDraft.sending = false; reportDraft.msg = null; }
+  function toggleReport() {
+    const q = currentQuestion();
+    if (reportDraft.id !== q.id) { resetReport(); reportDraft.id = q.id; }
+    reportDraft.open = !reportDraft.open;
+    render(reportDraft.open ? '#report-box input' : '#report-btn');
+  }
+  async function sendReport() {
+    const q = currentQuestion();
+    const d = reportDraft;
+    const fail = (text) => { d.msg = { type: 'err', text }; render('#report-send'); };
+    if (d.sending) return;
+    if (!d.types.size) return fail('Select at least one type of error.');
+    if (d.types.size === 1 && d.types.has('Other') && !d.comment.trim()) return fail('Please describe the problem in the comment box.');
+    if (!REGISTRY_URL) return fail('Reporting is not available: this site is not connected to the report sheet.');
+    d.sending = true; d.msg = { type: 'ok', text: 'Sending…' }; render('#report-send');
+    const reporter = state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : 'Unknown';
+    const res = await registry.call({
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'report', reporter, code: q.id, types: [...d.types], category: q.category,
+        question: q.question, choices: q.options.map((t, i) => `${letter(i)}. ${t}`).join('\n'),
+        answerKey: `${letter(q.correctIndex)}. ${q.options[q.correctIndex]}`, explanation: q.explanation || '', comment: d.comment.trim().slice(0, 1000),
+      }),
+    });
+    d.sending = false;
+    if (res) { reportedIds.add(q.id); resetReport(); render('#report-btn'); } else fail('Could not send the report. Check your connection and try again.');
+  }
+  function reportPanel(q) {
+    const d = reportDraft;
+    return h('div', { class: 'report-box', id: 'report-box' },
+      h('h3', { text: 'Report this question' }),
+      h('p', { class: 'muted', text: 'What looks wrong? Select everything that applies.' }),
+      REPORT_TYPES.map((t) => h('label', { class: 'inline-check' },
+        h('input', { type: 'checkbox', 'data-type': t, checked: d.types.has(t), on: { change: (e) => { if (e.target.checked) d.types.add(t); else d.types.delete(t); } } }), t)),
+      h('label', { for: 'report-comment', text: 'Additional comments (optional)' }),
+      h('textarea', { id: 'report-comment', maxlength: '1000', placeholder: 'For example: the answer key should be C because…', value: d.comment, on: { input: (e) => { d.comment = e.target.value; } } }),
+      d.msg && h('div', { class: `notice ${d.msg.type}`, role: 'alert' }, h('p', { text: d.msg.text })),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'button', id: 'report-send', text: d.sending ? 'Sending…' : 'Send report', disabled: d.sending, on: { click: sendReport } }),
+        h('button', { class: 'btn', type: 'button', id: 'report-cancel', text: 'Cancel', on: { click: toggleReport } })));
   }
 
   /* ---- answer-key edits ---- */
@@ -1085,14 +1139,48 @@
       })
     ));
     nodes.push(backupCard());
+    nodes.push(howItWorksCard());
     nodes.push(changelogCard());
     return nodes;
+  }
+
+  /** Workflow, where data lives, and how to move progress to another device. */
+  function howItWorksCard() {
+    return h('section', { class: 'card howto', id: 'howto' },
+      h('details', {},
+        h('summary', { text: 'How Quiz Time works' }),
+        h('h3', { text: 'Workflow' }),
+        h('ol', {}, [
+          'Log in with the ID and password (this lasts for the current tab only).',
+          'Enter your name and university once. They are saved in this browser.',
+          'On the main menu you see your progress per category. Choose categories and sources, the number of questions and the options (AI-generated questions, include questions already answered correctly), then start a test.',
+          'During the test, choose answers, use "Mark for review" for questions you want to revisit, and "Report" if a question, choice, answer key, explanation or category looks wrong. Answers are drafts until you submit.',
+          'Submit the exam. Only the questions you answered change status (correct or incorrect). Review the result by group, with answers and explanations if you want them.',
+          'History keeps your finished exams so you can retake the same questions. "Browse all questions" lets you read the whole bank.',
+        ].map((t) => h('li', { text: t }))),
+        h('h3', { text: 'Where your data is stored' }),
+        h('ul', {}, [
+          'Your progress is stored only in this browser, on this device (browser storage). It includes the status of each question, your exam history, an exam in progress, imported questions and answer-key edits.',
+          'It is not saved on a server and not tied to your login. The ID and password only unlock the question bank.',
+          'Only your name, university, a random device code and your question reports are sent to the admin\'s Google Sheet.',
+          'Progress is lost if you clear the browser\'s site data, use private mode, open the app in another browser or on another device, or press "Reset progress". Export a backup from time to time.',
+        ].map((t) => h('li', { text: t }))),
+        h('h3', { text: 'Move your progress to another device' }),
+        h('ol', {}, [
+          'On the old device, open the main menu and find "Back up your progress". Press "Export progress". A file named progress-(date).json is downloaded.',
+          'Send that file to the new device (WhatsApp, email, Google Drive, USB cable, anything that keeps the file as it is).',
+          'On the new device, open Quiz Time, log in and enter your name and university.',
+          'On the main menu, under "Back up your progress", choose the .json file in "Import progress".',
+          'Leave "Replace current progress" unchecked to merge with what is already there. Tick it only if you want the file to overwrite everything.',
+          'Check the message that says how many questions were restored, and your progress bar.',
+        ].map((t) => h('li', { text: t }))),
+        h('p', { class: 'muted', text: 'The backup contains question progress, answer-key edits and imported questions. It does not contain exam history, an exam in progress, or your name and university; those stay on the old device.' })));
   }
 
   function changelogCard() {
     return h('section', { class: 'card', id: 'changelog' },
       h('details', {},
-        h('summary', { text: `Changelog (latest: ${CHANGELOG[0].date})` }),
+        h('summary', { text: `Changelog (latest: ${CHANGELOG[0].date}, build e)` }),
         CHANGELOG.map((e) => h('div', { class: 'cl-entry' },
           h('h3', { text: e.date }),
           h('ul', {}, e.items.map((t) => h('li', { text: t })))))));
@@ -1416,10 +1504,16 @@
             text: isMarked ? 'Unmark review' : 'Mark for review', on: { click: toggleMark },
           }),
           h('button', {
+            class: 'btn', type: 'button', id: 'report-btn', 'aria-expanded': reportDraft.open && reportDraft.id === q.id ? 'true' : 'false',
+            text: reportedIds.has(q.id) ? 'Reported ✓' : 'Report', on: { click: toggleReport },
+          }),
+          h('button', {
             class: 'btn', type: 'button', id: 'next', text: 'Next →',
             disabled: s.index >= total - 1, on: { click: () => goTo(s.index + 1) },
           })
         ),
+        reportedIds.has(q.id) && !(reportDraft.open && reportDraft.id === q.id) && h('p', { class: 'muted', id: 'report-thanks', text: 'Thanks, your report was sent.' }),
+        reportDraft.open && reportDraft.id === q.id && reportPanel(q),
         chosen !== undefined && h('div', { class: 'row' },
           h('button', { class: 'btn link', type: 'button', id: 'clear-answer', text: 'Clear answer', on: { click: clearAnswer } }))
       ),
