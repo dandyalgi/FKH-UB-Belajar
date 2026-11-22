@@ -11,7 +11,33 @@
   const REGISTRY_URL = String((window.QUIZ_CONFIG && window.QUIZ_CONFIG.registryUrl) || '');
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
+    { date: '2026-11-22', items: [
+      'Starting a test: questions are now chosen by the six tinjauan (each in its own block, with counts), instead of the old category list. Sources are in a separate block and there is a "Reset all filters" button.',
+    ] },
+    { date: '2026-11-22', items: [
+      'Added 97 questions (TO NAS November 2026, IPB) and 111 questions (TO NAS November 2026, UNAIR). Contributors added, with the Paw3r Rangers team as a dropdown.',
+    ] },
+    { date: '2026-11-22', items: [
+      'Optional timer in minutes when you start a test. The remaining time shows during the test and the test is submitted automatically when time is up.',
+      'New "Print / PDF" page: pick questions (done or not done, by category, source or tinjauan), choose whether to include the answer key and explanations, then print or save as PDF. It follows the selected tab.',
+      'Progress is shared by both tabs: answering a question in one tab updates it in the other.',
+    ] },
+    { date: '2026-11-22', items: [
+      'Two tabs at the top: "All questions" (every question and all progress) and "Fokus UKMPPDH" (only TO Nasional November 2026, SIGAP / External 1 from batch 49 and SuksesUKMPPDH / External 2 from batch 6). Progress, test setup, Browse and History follow the selected tab.',
+    ] },
+    { date: '2026-11-22', items: [
+      'Questions can now include images in the question, in each answer choice, and in the explanation (tap an image to enlarge it). Images are stored inside the encrypted question bank.',
+      'Every question now carries one label in each of six "tinjauan" (competency area, learning domain, recall/reasoning, species, disease group, and the 16 competencies). Labels were assigned automatically and may be corrected later.',
+      'Results and exam history show correct/total per row for each tinjauan.',
+      'Browse and the test setup can be filtered by any tinjauan.',
+    ] },
+    { date: '2026-11-21', items: ['Added Agha Thariq Sugijanto to the contributors list.'] },
+    { date: '2026-11-20', items: [
+      'Reporting a question now also works in All questions (Browse) and in the review of test results and history, not only during a test.',
+      'The BPUPKH seal is now in the header.',
+      'Main menu: a Contributors list on the left and a Suggestions panel on the right, where you can send a suggestion or a Google Drive link with questions and answer keys.' ] },
     { date: '2026-11-07', items: [
+      'Three External 1 questions (Batches 40 and 43) were wrongly marked as AI-generated; they use the source key and explanation, so the AI note was removed.',
       'New questions: "Tryout External 1 UKMPPDH Batch 47" (answer key and explanations from the source) and "Tryout External 2 UKMPPDH Batch 1" (answer key from the highlighted options in the source; some missing explanations were added by AI). 157 new questions; duplicates of existing questions were skipped, but their explanations were replaced when the new source had a fuller one.',
       'Report a question: next to "Mark for review" there is now a "Report" button (incorrect question, answer choices, answer key, explanation, category, or other, plus an optional comment). Reports go to the admin\'s Google Sheet.',
       'New "How Quiz Time works" card on the main menu: the workflow, where your data is stored, and how to move your progress to another device.' ] },
@@ -41,7 +67,9 @@
     custom: 'quiz.custom.v1',     // questions imported in this browser
     user: 'quiz.user.v1',         // { id, name } of the participant on this browser
     edits: 'quiz.edits.v1',       // answer-key edits made in this browser
-    history: 'quiz.history.v1',   // [{ t, ids, a }] completed exams, newest last
+    history: 'quiz.history.v1',   // [{ t, ids, a, tab }] completed exams, newest last
+    timer: 'quiz.timer.v1',       // last timer length in minutes (0 = none)
+    tab: 'quiz.tab.v1',           // 'all' | 'focus': the tab last used
   });
   const STATUS_LABEL = Object.freeze({
     correct: 'Correct',
@@ -120,6 +148,48 @@
   const isText = (v) => typeof v === 'string' && v.trim() !== '';
   const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
   const letter = (i) => String.fromCharCode(65 + i);
+  /**
+   * Six "tinjauan" (review dimensions). Each question carries one code per tinjauan
+   * in q.tj = [t1, t2, t3, t4, t5, t6]. Results and filters group by these codes.
+   */
+  const TINJAUAN = Object.freeze([
+    { n: 1, cats: [['1', 'Ketrampilan dasar klinis'], ['2', 'Aplikasi biomedis, perilaku hewan, klinis dan epidemiologi Veteriner'], ['3', 'Keterampilan Komunikasi Veteriner'], ['4', 'Manajemen kesehatan hewan'], ['5', 'Penelusuran, kritisi, dan manajemen informasi veteriner'], ['6', 'Profesionalisme, moral, dan etika praktik veteriner'], ['7', 'Kesadaran, pemeliharaan, dan pengembangan personal']] },
+    { n: 2, cats: [['K', 'Kognitif'], ['P', 'Psikomotor'], ['A', 'Afektif']] },
+    { n: 3, cats: [['Rc', 'Menghafal (Recall)'], ['Rs', 'Analitik/argumentasi (Reasoning)']] },
+    { n: 4, cats: [['Bsr', 'Hewan Besar (Hewan Produksi)'], ['Kes', 'Hewan Kesayangan & eksotik'], ['Lia', 'Satwa Liar & akuatik konservasi'], ['Ikn', 'Ikan'], ['Ung', 'Unggas'], ['Lain', 'Lain - lain']] },
+    { n: 5, cats: [['Inf', 'Penyakit infeksius (bakteri, virus, parasit, protozoa, jamur)'], ['NonI', 'Penyakit non infeksius (degeneratif, defisiensi nutrisi)'], ['Kulit', 'Penyakit Kulit'], ['Repro', 'Reproduksi dan Aplikasi Teknologi'], ['Kesmavet', 'Kesmavet dan Epidemiologi'], ['Lab', 'Diagnosa laboratorium (Patologi, Patologi klinik, Mikro, Parasit)'], ['Bedah', 'Bedah dan Radiologi'], ['OneH', 'One Health : emerging dan re-emerging disease'], ['Resep', 'Reseptir dan Kerumahsakitan']] },
+    { n: 6, cats: [['1', '1. Wawasan etika veteriner, hakikat sumpah dan kode etik profesi'], ['2', '2. Wawasan sistem kesehatan hewan nasional dan legislasi veteriner'], ['3', '3. Keterampilan tindakan medis yang lege-artis'], ['4', '4. Keterampilan menangani penyakit pada hewan besar, kecil, unggas, eksotik, satwa liar, akuatik dan laboratorium'], ['5A', '5A. Diagnosis klinik, laboratorik, patologik, dan epidemiologik'], ['5B', '5B. Penyusunan nutrisi untuk kesehatan dan gangguan medis'], ['5C', '5C. Pemeriksaan antemortem dan postmortem'], ['5D', '5D. Pemeriksaan kebuntingan, gangguan reproduksi dan aplikasi teknologi reproduksi'], ['5E', '5E. Pengawasan keamanan dan mutu produk hewan'], ['5F', '5F. Pengawasan dan pengendalian mutu obat hewan dan bahan biologis'], ['5G', '5G. Pengukuran (assesment) dan penyeliaan kesejahteraan hewan'], ['6', '6. Komunikasi profesional (professional communication/dialogue)'], ['7', '7. Pengendalian dan penanggulangan penyakit strategis, baru, zoonosis, transboundary, keamanan hayati'], ['8', '8. Transaksi terapeutik: anamnesis, rekam medis, informed consent, resep, surat keterangan, edukasi klien'], ['9', '9. Analisis risiko, analisis ekonomi veteriner, kewirausahaan'], ['10', '10. Manajerial dan kepemimpinan veteriner']] },
+  ]);
+  // Tinjauan 6 uses "1" and "6" etc. as its own codes; keep them apart from the tinjauan-1 codes by position.
+  const TJ_CODES = TINJAUAN.map((t) => new Set(t.cats.map((c) => c[0])));
+  const hasTj = (q) => Array.isArray(q.tj);
+  const tjOf = (q, i) => (hasTj(q) ? q.tj[i] : '');
+  /** tjSel = array of 6 (null = everything, or a Set of codes). */
+  const inTj = (tjSel, q) => !tjSel || tjSel.every((sel, i) => sel === null || sel.has(tjOf(q, i)));
+  const noTj = () => [null, null, null, null, null, null];
+
+  /**
+   * "Fokus UKMPPDH" tab: only questions whose source matches one of these rules.
+   *   SIGAP (External 1) from batch 49, SuksesUKMPPDH (External 2) from batch 6, TO Nasional November 2026.
+   * A source name must contain "External 1"/"SIGAP" (or "External 2"/"SuksesUKMPPDH") and "Batch <number>",
+   * or "TO NAS"/"TO Nasional" together with "November 2026".
+   */
+  const FOCUS_RULES = Object.freeze([
+    { re: /(?:external\s*1|sigap).*?batch\s*(\d+)/i, min: 49 },
+    { re: /(?:external\s*2|sukses\s*-?\s*ukmppdh).*?batch\s*(\d+)/i, min: 6 },
+    { re: /to\s*nas(?:ional)?.*?(?:nov|november)\s*2026/i, min: null },
+  ]);
+  const isFocusSource = (source) => FOCUS_RULES.some((r) => {
+    const m = r.re.exec(String(source));
+    return Boolean(m) && (r.min === null || Number(m[1]) >= r.min);
+  });
+  const TABS = Object.freeze([['all', 'All questions'], ['focus', 'Fokus UKMPPDH']]);
+
+  /** An image source is either an embedded data URI or a plain relative file path (no scheme, no "..", no leading slash). */
+  const SAFE_IMG = /^(?:data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+|(?!.*\.\.)[A-Za-z0-9_][A-Za-z0-9_\-./]*\.(?:png|jpe?g|webp|gif|svg))$/i;
+  const cleanImgs = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && SAFE_IMG.test(x.trim())).map((x) => x.trim()) : []);
+  const cleanOptImgs = (v, n) => (Array.isArray(v) && v.length === n ? v.map((x) => (typeof x === 'string' && SAFE_IMG.test(x.trim()) ? x.trim() : '')) : null);
+
   /** "Category · Source · code", where Source is "-" when the question has none. */
   const labelOf = (q) => `${q.category} · ${q.source} · ${q.id}`;
 
@@ -153,6 +223,10 @@
         correctIndex: raw.correctIndex,
         explanation: typeof raw.explanation === 'string' ? raw.explanation : '',
         aiGenerated: raw.aiGenerated === true,
+        images: Object.freeze(cleanImgs(raw.images)),
+        explanationImages: Object.freeze(cleanImgs(raw.explanationImages)),
+        optionImages: cleanOptImgs(raw.optionImages, raw.options.length) && Object.freeze(cleanOptImgs(raw.optionImages, raw.options.length)),
+        tj: Array.isArray(raw.tj) && raw.tj.length === 6 && raw.tj.every((c, i) => TJ_CODES[i].has(String(c))) ? Object.freeze(raw.tj.map(String)) : null,
       }),
     };
   }
@@ -199,7 +273,7 @@
 
   /** scope = { cats, srcs }: each is null (everything) or a Set of selected values. */
   function examPool(questions, progress, scope, includeAi = true, includeCorrect = false) {
-    const inScope = questions.filter((q) => inSet(scope.cats, q.category) && inSet(scope.srcs, q.source) && (includeAi || !q.aiGenerated));
+    const inScope = questions.filter((q) => inSet(scope.cats, q.category) && inSet(scope.srcs, q.source) && (includeAi || !q.aiGenerated) && inTj(scope.tj, q));
     if (includeCorrect) return { pool: inScope, repeat: false };
     const fresh = inScope.filter((q) => progress[q.id] !== 'correct');
     if (fresh.length || !inScope.length) return { pool: fresh, repeat: false };
@@ -235,6 +309,10 @@
     correctIndex: q.correctIndex,
     explanation: q.explanation,
     aiGenerated: q.aiGenerated,
+    ...(q.tj ? { tj: [...q.tj] } : {}),
+    ...(q.images && q.images.length ? { images: [...q.images] } : {}),
+    ...(q.explanationImages && q.explanationImages.length ? { explanationImages: [...q.explanationImages] } : {}),
+    ...(q.optionImages && q.optionImages.some(Boolean) ? { optionImages: [...q.optionImages] } : {}),
   });
 
   /* ======================================================================
@@ -251,7 +329,8 @@
 
   /** UI-only state for the SETUP screen: panel = 'home' | 'browse' | 'manage'. */
   function freshUi(panel = 'home') {
-    return { panel, notice: null, filter: { status: 'all', cats: null, srcs: null, query: '', reveal: false } };
+    return { panel, notice: null, filter: { status: 'all', cats: null, srcs: null, tj: noTj(), query: '', reveal: false },
+      print: { status: 'all', cats: null, srcs: null, tj: noTj(), query: '', sel: new Set(), key: true, expl: true } };
   }
 
   const state = {
@@ -270,8 +349,9 @@
     history: [],
     key: null,                  // CryptoKey once logged in
     env: null,                  // envelope of the loaded bank (salt, iterations)
-    scope: { cats: null, srcs: null }, // exam setup selection; null = everything
+    scope: { cats: null, srcs: null, tj: noTj() }, // exam setup selection; null = everything
     error: null,
+    tab: 'all',
     ui: freshUi(),
     user: null,                 // { id, name }
     participants: null,         // number of participants, when the registry is configured
@@ -305,8 +385,21 @@
     state.questions = base.map(applyEdit);
     state.byId = new Map(state.questions.map((q) => [q.id, q]));
     // The bank changed (load or import): any category/source it adds must be selectable, so go back to "all".
-    state.scope = { cats: null, srcs: null };
-    if (state.ui && state.ui.filter) { state.ui.filter.cats = null; state.ui.filter.srcs = null; }
+    state.scope = { cats: null, srcs: null, tj: noTj() };
+    if (state.ui && state.ui.filter) { state.ui.filter.cats = null; state.ui.filter.srcs = null; state.ui.filter.tj = noTj(); }
+  }
+
+  /** The questions of the current tab. Progress and history are per question, so the tabs simply look at different subsets. */
+  const scopeQs = () => (state.tab === 'focus' ? state.questions.filter((q) => isFocusSource(q.source)) : state.questions);
+  const tabHistory = () => state.history.map((e, i) => ({ e, i })).filter(({ e }) => state.tab === 'all' || e.tab === 'focus');
+
+  function setTab(tab) {
+    if (tab === state.tab) return;
+    state.tab = tab;
+    storage.write(KEYS.tab, tab);
+    state.scope = { cats: null, srcs: null, tj: noTj() };
+    state.ui = freshUi();
+    render();
   }
 
   function nextIdNumber() {
@@ -337,7 +430,7 @@
       if (!e || typeof e !== 'object' || !Array.isArray(e.ids) || !Array.isArray(e.a)) continue;
       if (!Number.isFinite(e.t) || !e.ids.length || e.ids.length !== e.a.length) continue;
       if (!e.ids.every((id) => typeof id === 'string') || !e.a.every((x) => Number.isInteger(x))) continue;
-      out.push({ t: e.t, ids: e.ids, a: e.a });
+      out.push({ t: e.t, ids: e.ids, a: e.a, tab: e.tab === 'focus' ? 'focus' : 'all' });
     }
     return out.slice(-HISTORY_MAX);
   }
@@ -447,7 +540,9 @@
     const marked = Object.create(null);
     const rawMarked = raw.marked && typeof raw.marked === 'object' ? raw.marked : {};
     for (const id of ids) if (rawMarked[id] === true) marked[id] = true;
-    return { ids, index, answers, marked, submitted: raw.submitted === true || legacyFinished };
+    const limit = Number.isFinite(raw.limit) && raw.limit > 0 && raw.limit <= 600 ? raw.limit : 0;
+    const endAt = limit && Number.isFinite(raw.endAt) ? raw.endAt : 0;
+    return { ids, index, answers, marked, submitted: raw.submitted === true || legacyFinished, limit, endAt };
   }
 
   /* ---- loading ---- */
@@ -500,6 +595,7 @@
       state.session = loadSession();
       registry.sync();
       state.history = loadHistory();
+      state.tab = storage.read(KEYS.tab, 'all') === 'focus' ? 'focus' : 'all';
       state.ui = freshUi();
 
       if (!state.session) transition('SETUP');
@@ -514,13 +610,13 @@
   }
 
   /* ---- actions ---- */
-  function startTest(scope, count, includeAi, includeCorrect) {
+  function startTest(scope, count, includeAi, includeCorrect, limit = 0) {
     resetReport();
-    const { pool } = examPool(state.questions, state.progress, scope, includeAi, includeCorrect);
+    const { pool } = examPool(scopeQs(), state.progress, scope, includeAi, includeCorrect);
     if (!pool.length) return;
     const n = Math.max(1, Math.min(count, pool.length));
     const ids = balancedDraw(pool, n).map((q) => q.id);
-    state.session = { ids, index: 0, answers: Object.create(null), marked: Object.create(null), submitted: false };
+    state.session = { ids, index: 0, answers: Object.create(null), marked: Object.create(null), submitted: false, limit, endAt: limit ? Date.now() + limit * 60000 : 0 };
     saveSession();
     transition('ACTIVE');
     render();
@@ -574,6 +670,7 @@
   /** Grades the exam. Only answered questions change status; unanswered ones keep theirs. */
   function submitExam() {
     resetReport();
+    stopTicker();
     const s = state.session;
     for (const id of s.ids) {
       const choice = s.answers[id];
@@ -583,7 +680,7 @@
     s.submitted = true;
     const answered = s.ids.filter((id) => s.answers[id] !== undefined);
     if (answered.length) {
-      state.history.push({ t: Date.now(), ids: answered, a: answered.map((id) => s.answers[id]) });
+      state.history.push({ t: Date.now(), ids: answered, a: answered.map((id) => s.answers[id]), tab: state.tab });
       if (state.history.length > HISTORY_MAX) state.history = state.history.slice(-HISTORY_MAX);
       saveHistory();
     }
@@ -595,6 +692,7 @@
 
   function leaveTest() {
     resetReport();
+    stopTicker();
     state.session = null;
     saveSession();
     state.ui = freshUi();
@@ -700,17 +798,60 @@
     if (d.types.size === 1 && d.types.has('Other') && !d.comment.trim()) return fail('Please describe the problem in the comment box.');
     if (!REGISTRY_URL) return fail('Reporting is not available: this site is not connected to the report sheet.');
     d.sending = true; d.msg = { type: 'ok', text: 'Sending…' }; render('#report-send');
-    const reporter = state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : 'Unknown';
-    const res = await registry.call({
-      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        action: 'report', reporter, code: q.id, types: [...d.types], category: q.category,
-        question: q.question, choices: q.options.map((t, i) => `${letter(i)}. ${t}`).join('\n'),
-        answerKey: `${letter(q.correctIndex)}. ${q.options[q.correctIndex]}`, explanation: q.explanation || '', comment: d.comment.trim().slice(0, 1000),
-      }),
-    });
+    const res = await postReport(q, d.types, d.comment);
     d.sending = false;
     if (res) { reportedIds.add(q.id); resetReport(); render('#report-btn'); } else fail('Could not send the report. Check your connection and try again.');
+  }
+  function postReport(q, types, comment) {
+    const reporter = state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : 'Unknown';
+    return registry.call({
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'report', reporter, code: q.id, types: [...types], category: q.category,
+        question: q.question, choices: q.options.map((t, i) => `${letter(i)}. ${t}`).join('\n'),
+        answerKey: `${letter(q.correctIndex)}. ${q.options[q.correctIndex]}`, explanation: q.explanation || '', comment: comment.trim().slice(0, 1000),
+      }),
+    });
+  }
+  /** Self-contained Report button + panel for one question (used in Browse and in the results review). Does not re-render the page. */
+  function reportControl(q) {
+    const wrap = h('div', { class: 'item-report' });
+    const types = new Set(); let comment = ''; let open = false; let sending = false; let msg = null;
+    const paintR = (focus) => {
+      const btn = h('button', { class: 'btn', type: 'button', 'data-report': q.id, 'aria-expanded': open ? 'true' : 'false', text: reportedIds.has(q.id) ? 'Reported ✓' : 'Report',
+        on: { click: () => { open = !open; msg = null; paintR(open ? 'input' : 'button'); } } });
+      const kids = [h('div', { class: 'row item-actions' }, btn)];
+      if (reportedIds.has(q.id) && !open) kids.push(h('p', { class: 'muted', text: 'Thanks, your report was sent.' }));
+      if (open) {
+        kids.push(h('div', { class: 'report-box' },
+          h('h3', { text: 'Report this question' }),
+          h('p', { class: 'muted', text: 'What looks wrong? Select everything that applies.' }),
+          REPORT_TYPES.map((t) => h('label', { class: 'inline-check' },
+            h('input', { type: 'checkbox', 'data-type': t, checked: types.has(t), on: { change: (e) => { if (e.target.checked) types.add(t); else types.delete(t); } } }), t)),
+          h('label', { text: 'Additional comments (optional)' }),
+          h('textarea', { maxlength: '1000', placeholder: 'For example: the answer key should be C because…', value: comment, on: { input: (e) => { comment = e.target.value; } } }),
+          msg && h('div', { class: `notice ${msg.type}`, role: 'alert' }, h('p', { text: msg.text })),
+          h('div', { class: 'row' },
+            h('button', { class: 'btn primary', type: 'button', 'data-send': q.id, text: sending ? 'Sending…' : 'Send report', disabled: sending,
+              on: { click: async () => {
+                if (sending) return;
+                const fail = (text) => { msg = { type: 'err', text }; paintR('send'); };
+                if (!types.size) return fail('Select at least one type of error.');
+                if (types.size === 1 && types.has('Other') && !comment.trim()) return fail('Please describe the problem in the comment box.');
+                if (!REGISTRY_URL) return fail('Reporting is not available: this site is not connected to the report sheet.');
+                sending = true; msg = { type: 'ok', text: 'Sending…' }; paintR('send');
+                const res = await postReport(q, types, comment);
+                sending = false;
+                if (res) { reportedIds.add(q.id); types.clear(); comment = ''; open = false; msg = null; paintR('button'); } else fail('Could not send the report. Check your connection and try again.');
+              } } }),
+            h('button', { class: 'btn', type: 'button', text: 'Cancel', on: { click: () => { open = false; msg = null; paintR('button'); } } }))));
+      }
+      wrap.replaceChildren(...kids);
+      const el = focus === 'input' ? wrap.querySelector('input') : focus === 'send' ? wrap.querySelector('[data-send]') : focus === 'button' ? wrap.querySelector('[data-report]') : null;
+      if (el) el.focus();
+    };
+    paintR();
+    return wrap;
   }
   function reportPanel(q) {
     const d = reportDraft;
@@ -853,7 +994,7 @@
     return el;
   }
 
-  const mount = (nodes) => app.replaceChildren(...nodes);
+  const mount = (nodes) => app.replaceChildren(...nodes.filter(Boolean));
 
   const refs = { notice: null };
 
@@ -873,12 +1014,32 @@
   /* ======================================================================
    * Shared view pieces
    * ==================================================================== */
+  /** Click an image to see it large; click again (or press Escape) to close. */
+  function zoomImage(src, alt) {
+    const box = h('div', { class: 'lightbox', role: 'dialog', 'aria-label': 'Image preview' }, h('img', { src, alt }));
+    const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    box.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.append(box);
+  }
+  function imageNodes(list, what, cls = 'q-images') {
+    if (!list || !list.length) return null;
+    return h('div', { class: cls }, list.map((src, i) => h('img', {
+      class: 'q-img', src, alt: `${what} ${i + 1}`, loading: 'lazy', tabindex: '0',
+      on: { click: () => zoomImage(src, `${what} ${i + 1}`), keydown: (e) => { if (e.key === 'Enter') zoomImage(src, `${what} ${i + 1}`); } },
+    })));
+  }
+  const stemNodes = (q) => [h('p', { class: 'question-text', text: q.question }), imageNodes(q.images, 'Question image')];
+  const optionImage = (q, i) => (q.optionImages && q.optionImages[i] ? imageNodes([q.optionImages[i]], `Option ${letter(i)} image`, 'opt-images') : null);
+
   function explanationNode(q, open = false) {
-    return h('details', { class: 'explanation', open: open && Boolean(q.explanation) },
+    return h('details', { class: 'explanation', open: open && Boolean(q.explanation || (q.explanationImages && q.explanationImages.length)) },
       h('summary', { text: 'Show explanation' }),
       q.explanation
         ? h('p', { text: q.explanation })
-        : h('p', { class: 'muted', text: 'No explanation provided for this question.' })
+        : ((q.explanationImages && q.explanationImages.length) ? null : h('p', { class: 'muted', text: 'No explanation provided for this question.' })),
+      imageNodes(q.explanationImages, 'Explanation image')
     );
   }
 
@@ -898,7 +1059,7 @@
       else if (i === chosen) { cls += ' wrong'; mark = '✗'; }
       return h('li', {}, h('div', { class: cls },
         h('span', { class: 'letter', text: letter(i) }),
-        h('span', { text }),
+        h('span', {}, h('span', { text }), optionImage(q, i)),
         mark && h('span', { class: 'mark', 'aria-hidden': 'true', text: mark })
       ));
     }));
@@ -1022,32 +1183,93 @@
     return { node, refresh };
   }
 
+  /** Six checkbox groups (one per tinjauan) inside one collapsible block. */
+  function tjFilter(prefix, getArr, labelFn, onChange) {
+    const groups = TINJAUAN.map((t, i) => multiCheck(`${prefix}-t${t.n}`, `Tinjauan ${t.n}`,
+      t.cats.map(([code, name]) => ({ value: code, label: () => `${name} (${labelFn(i, code)})` })),
+      () => getArr()[i], (v) => { getArr()[i] = v; }, () => { onChange(); }));
+    return {
+      node: h('details', { class: 'group tj-filter', id: `${prefix}-tj` },
+        h('summary', { text: 'Tinjauan 1–6 (competency, learning domain, reasoning, species, disease group, 16 competencies)' }),
+        h('div', {}, groups.map((g) => g.node))),
+      refresh: () => groups.forEach((g) => g.refresh()),
+    };
+  }
+
+  const TJ_TITLE = Object.freeze({ 1: 'Competency area', 2: 'Learning domain (K / P / A)', 3: 'Recall or reasoning', 4: 'Animal group', 5: 'Disease group', 6: '16 competencies' });
+  /** Test setup: one collapsible block per tinjauan, each showing how many of its rows are selected. */
+  function tjSeparate(prefix, getArr, labelFn, onChange) {
+    const parts = TINJAUAN.map((t, i) => {
+      const g = multiCheck(`${prefix}-t${t.n}`, `Tinjauan ${t.n}`,
+        t.cats.map(([code, name]) => ({ value: code, label: () => `${name} (${labelFn(i, code)})` })),
+        () => getArr()[i], (v) => { getArr()[i] = v; }, () => { onChange(); });
+      const sum = h('span', { class: 'muted tj-count' });
+      const node = h('details', { class: 'group tj-block', id: `${prefix}-tj${t.n}`, open: t.n === 1 },
+        h('summary', {}, h('b', { text: `Tinjauan ${t.n}: ${TJ_TITLE[t.n]}` }), ' ', sum), g.node);
+      const refresh = () => { g.refresh(); const sel = getArr()[i]; sum.textContent = sel === null ? '(all)' : `(${sel.size} of ${t.cats.length})`; };
+      refresh();
+      return { node, refresh };
+    });
+    return { nodes: parts.map((x) => x.node), refresh: () => parts.forEach((x) => x.refresh()) };
+  }
+
+  /** "Correct/total" tables per tinjauan, for the questions of one test (answers: id -> chosen index). */
+  function tinjauanSection(items, answers) {
+    const tagged = items.filter((q) => q && hasTj(q));
+    if (!tagged.length) return null;
+    const th = (text, num) => h('th', { class: num ? 'num' : '', text });
+    const tables = TINJAUAN.map((t, i) => {
+      const rows = t.cats.map(([code, name]) => {
+        const qs = tagged.filter((q) => q.tj[i] === code);
+        return { name, total: qs.length, correct: qs.filter((q) => answers[q.id] === q.correctIndex).length };
+      }).filter((r) => r.total);
+      const total = rows.reduce((a, r) => a + r.total, 0);
+      const correct = rows.reduce((a, r) => a + r.correct, 0);
+      return h('div', { class: 'table-wrap' },
+        h('table', { class: 'tj-table' },
+          h('thead', {}, h('tr', {}, th(`Tinjauan ${t.n}`), th('Correct / total', true), th('%', true))),
+          h('tbody', {},
+            rows.map((r) => h('tr', {}, h('td', { text: r.name }), h('td', { class: 'num', text: `${r.correct}/${r.total}` }), h('td', { class: 'num', text: `${pct(r.correct, r.total)}%` }))),
+            h('tr', { class: 'tj-sum' }, h('td', { text: 'Summary' }), h('td', { class: 'num', text: `${correct}/${total}` }), h('td', { class: 'num', text: `${pct(correct, total)}%` })))));
+    });
+    return h('section', { class: 'card', id: 'tinjauan' },
+      h('h2', { text: 'Correct answers per tinjauan' }),
+      h('p', { class: 'muted', text: 'Every question belongs to one row in each of the six tables. Unanswered questions count as not correct. Labels were assigned automatically and may be imperfect.' }),
+      tables);
+  }
+
   function testForm(stats) {
     const scope = state.scope;
-    const sources = sortedUnique(state.questions.map((q) => q.source));
+    const sources = sortedUnique(scopeQs().map((q) => q.source));
     const count = h('input', { id: 'count', type: 'number', min: '1', step: '1', inputmode: 'numeric' });
     const aiBox = h('input', { id: 'include-ai', type: 'checkbox', checked: state.includeAi });
     const corBox = h('input', { id: 'include-correct', type: 'checkbox', checked: state.includeCorrect });
+    const timerIn = h('input', { id: 'timer-min', type: 'number', min: '1', max: '600', step: '1', inputmode: 'numeric', placeholder: 'No timer' });
+    const savedTimer = Number(storage.read(KEYS.timer, 0));
+    if (savedTimer > 0) timerIn.value = String(savedTimer);
     const info = h('p', { class: 'muted', id: 'pool-info' });
     const start = h('button', { class: 'btn primary', type: 'submit', id: 'start', text: 'Start test' });
 
-    const avail = (sc) => state.questions.filter((q) => inSet(sc.cats, q.category) && inSet(sc.srcs, q.source)
+    const avail = (sc) => scopeQs().filter((q) => inSet(sc.cats, q.category) && inSet(sc.srcs, q.source) && inTj(sc.tj || scope.tj, q)
       && (aiBox.checked || !q.aiGenerated) && (corBox.checked || state.progress[q.id] !== 'correct')).length;
     const tag = (n) => (n ? `${n} available` : (corBox.checked ? 'none' : 'none new'));
 
-    const catGroup = multiCheck('x-cat', 'Categories',
-      stats.categories.map((c) => ({ value: c.category, label: () => `${c.category} (${tag(avail({ cats: new Set([c.category]), srcs: scope.srcs }))})` })),
-      () => scope.cats, (v) => { scope.cats = v; }, () => sync());
     const srcGroup = multiCheck('x-src', 'Sources',
       sources.map((v) => ({ value: v, label: () => `${v} (${tag(avail({ cats: scope.cats, srcs: new Set([v]) }))})` })),
       () => scope.srcs, (v) => { scope.srcs = v; }, () => sync());
 
+    const tjGroup = tjSeparate('x', () => scope.tj, (i, code) => {
+      const tmp = scope.tj.slice(); tmp[i] = new Set([code]);
+      return tag(avail({ cats: scope.cats, srcs: scope.srcs, tj: tmp }));
+    }, () => sync());
+    const resetBtn = h('button', { class: 'btn link', type: 'button', id: 'x-reset', text: 'Reset all filters', on: { click: () => { scope.cats = null; scope.srcs = null; scope.tj = noTj(); sync(); } } });
+
     const sync = () => {
       state.includeAi = aiBox.checked;
       state.includeCorrect = corBox.checked;
-      catGroup.refresh();
       srcGroup.refresh();
-      const { pool, repeat } = examPool(state.questions, state.progress, scope, aiBox.checked, corBox.checked);
+      tjGroup.refresh();
+      const { pool, repeat } = examPool(scopeQs(), state.progress, scope, aiBox.checked, corBox.checked);
       count.max = String(pool.length);
       const cur = parseInt(count.value, 10);
       if (!Number.isInteger(cur) || cur < 1 || cur > pool.length) {
@@ -1068,17 +1290,24 @@
       on: {
         submit: (e) => {
           e.preventDefault();
-          const { pool } = examPool(state.questions, state.progress, scope, aiBox.checked, corBox.checked);
+          const { pool } = examPool(scopeQs(), state.progress, scope, aiBox.checked, corBox.checked);
           const n = parseInt(count.value, 10);
           if (!pool.length) return;
-          startTest(scope, Number.isInteger(n) ? n : Math.min(DEFAULT_COUNT, pool.length), aiBox.checked, corBox.checked);
+          const mins = Math.floor(Number(timerIn.value));
+          const limit = Number.isFinite(mins) && mins >= 1 ? Math.min(mins, 600) : 0;
+          storage.write(KEYS.timer, limit);
+          startTest(scope, Number.isInteger(n) ? n : Math.min(DEFAULT_COUNT, pool.length), aiBox.checked, corBox.checked, limit);
         },
       },
     },
       h('h2', { text: 'Start a new test' }),
-      catGroup.node,
-      srcGroup.node,
+      h('p', { class: 'muted', text: 'Pick the questions by tinjauan. Within one tinjauan the ticked rows are combined (any of them); across tinjauan they must all match. Leave a tinjauan on "All" to ignore it.' }),
+      tjGroup.nodes,
+      h('details', { class: 'group', id: 'x-src-block' }, h('summary', { text: 'Sources (which test or batch the questions come from)' }), srcGroup.node),
+      h('div', { class: 'row' }, resetBtn),
       h('label', { for: 'count', text: 'Number of questions' }), count,
+      h('label', { for: 'timer-min', text: 'Timer in minutes (optional)' }), timerIn,
+      h('p', { class: 'muted', text: 'Leave empty for no time limit. When the time is up the test is submitted automatically.' }),
       h('label', { class: 'inline-check', for: 'include-ai' }, aiBox, 'Include AI-generated questions and answers'),
       h('label', { class: 'inline-check', for: 'include-correct' }, corBox, 'Include questions already answered correctly'),
       info,
@@ -1086,11 +1315,82 @@
     );
   }
 
+  /* ---- BPUPKH side panels: contributors (left) and suggestions / Drive links (right) ---- */
+  function contribCard() {
+    const list = Array.isArray(window.BPUPKH_CONTRIBUTORS) ? window.BPUPKH_CONTRIBUTORS.filter((c) => c && c.name) : [];
+    return h('section', { class: 'card side-card', id: 'contributors' },
+      h('h2', { text: 'Contributors' }),
+      list.length
+        ? h('ul', { class: 'contrib-list' }, list.map((c) => (Array.isArray(c.members) && c.members.length ? h('li', {}, h('details', { class: 'contrib-group' }, h('summary', {}, h('b', { text: `${c.name} (${c.members.length})` })), h('ul', { class: 'contrib-members' }, c.members.map((m) => h('li', { text: String(m) }))))) : h('li', {}, h('b', { text: String(c.name) }), (c.role || c.uni) && h('span', { text: [c.role, c.uni].filter(Boolean).join(' · ') })))))
+        : h('p', { class: 'muted', text: 'Contributors will be listed here. Want to be one? Send a suggestion or a Google Drive link on the right.' }));
+  }
+  let lastSuggest = 0;
+  function suggestCard(send, who) {
+    const kind = h('select', { id: 'sug-kind' }, h('option', { value: 'Suggestion', text: 'Suggestion' }), h('option', { value: 'Contribution', text: 'Contribution: Google Drive link' }));
+    const link = h('input', { id: 'sug-link', type: 'text', maxlength: '400', autocomplete: 'off', placeholder: 'https://drive.google.com/…' });
+    const msg = h('textarea', { id: 'sug-msg', maxlength: '1500', placeholder: 'Your suggestion, or a short note about the files (questions and answer keys, source, university).' });
+    const note = h('p', { class: 'notice', id: 'sug-note', role: 'status', hidden: true });
+    const btn = h('button', { class: 'btn primary', type: 'submit', id: 'sug-send', text: 'Send' });
+    const say = (type, text) => { note.hidden = false; note.className = `notice ${type}`; note.textContent = text; };
+    return h('form', {
+      class: 'card side-card sug-form', id: 'suggestions', novalidate: true,
+      on: {
+        submit: async (e) => {
+          e.preventDefault();
+          const url = link.value.trim(); const text = msg.value.trim();
+          if (url && !/^https:\/\/(drive|docs)\.google\.com\/\S+$/i.test(url)) return say('err', 'The link must be a Google Drive or Google Docs link (https://drive.google.com/…).');
+          if (kind.value === 'Contribution' && !url) return say('err', 'Paste the Google Drive link with your questions and answer keys.');
+          if (!url && text.length < 5) return say('err', 'Write your suggestion first (at least 5 characters).');
+          if (Date.now() - lastSuggest < 30000) return say('err', 'Please wait a few seconds before sending another one.');
+          btn.disabled = true; say('ok', 'Sending…');
+          const res = await send({ action: 'suggest', sender: who(), kind: kind.value, link: url, message: text });
+          btn.disabled = false;
+          if (res === 'nourl') return say('err', 'Suggestions are not available: this site is not connected to the Google Sheet.');
+          if (!res) return say('err', 'Could not send. Check your connection and try again.');
+          lastSuggest = Date.now(); link.value = ''; msg.value = ''; say('ok', 'Thank you! Your message was sent.');
+        },
+      },
+    },
+    h('h2', { text: 'Suggestions' }),
+    h('p', { class: 'muted', text: 'Send a suggestion, or share a Google Drive link with questions and answer keys. Set the link to “Anyone with the link can view”.' }),
+    h('label', { for: 'sug-kind', text: 'Type' }), kind,
+    h('label', { for: 'sug-link', text: 'Google Drive link (optional for suggestions)' }), link,
+    h('label', { for: 'sug-msg', text: 'Message' }), msg,
+    h('div', { class: 'form-actions' }, btn), note);
+  }
+  const bpupkhShell = (nodes, left, right) => h('div', { class: 'shell' }, h('aside', { class: 'left' }, left), h('div', { class: 'mainCol' }, nodes), h('aside', { class: 'right' }, right));
+
+  function tabBar() {
+    return h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([id, label]) => h('button', {
+      class: `tab${state.tab === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`,
+      'aria-selected': String(state.tab === id), text: label, on: { click: () => setTab(id) },
+    })));
+  }
+
+  function focusEmpty() {
+    return h('section', { class: 'card', id: 'focus-empty' },
+      h('h2', { text: 'Fokus UKMPPDH' }),
+      h('p', { text: 'Belum ada soal di tab ini. Tab ini hanya berisi soal dari:' }),
+      h('ul', {},
+        h('li', { text: 'TO Nasional November 2026' }),
+        h('li', { text: 'SIGAP (External 1) mulai batch 49' }),
+        h('li', { text: 'SuksesUKMPPDH (External 2) mulai batch 6' })),
+      h('p', { class: 'muted', text: 'Gunakan tab "All questions" untuk seluruh soal.' }));
+  }
+
   function viewSetup() {
+    const inner = viewSetupInner();
+    const body = state.tab === 'focus' && !scopeQs().length && state.ui.panel !== 'manage' && state.ui.panel !== 'history'
+      ? [focusEmpty()] : inner;
+    return [tabBar(), ...body];
+  }
+
+  function viewSetupInner() {
     if (state.ui.panel === 'manage') return viewManage();
     if (state.ui.panel === 'browse') return viewBrowse();
     if (state.ui.panel === 'history') return viewHistory();
-    const stats = computeStats(state.questions, state.progress);
+    if (state.ui.panel === 'print') return viewPrint();
+    const stats = computeStats(scopeQs(), state.progress);
     const t = stats.total;
     const nodes = [];
 
@@ -1123,7 +1423,11 @@
         on: { click: () => { state.ui = freshUi('browse'); render(); } },
       }),
       h('button', {
-        class: 'btn', type: 'button', id: 'history-btn', text: `History (${state.history.length})`,
+        class: 'btn', type: 'button', id: 'print-btn', text: 'Print / PDF',
+        on: { click: () => { state.ui = freshUi('print'); render(); } },
+      }),
+      h('button', {
+        class: 'btn', type: 'button', id: 'history-btn', text: `History (${tabHistory().length})`,
         on: { click: () => { state.ui = freshUi('history'); render(); } },
       }),
       h('button', {
@@ -1142,7 +1446,9 @@
     nodes.push(backupCard());
     nodes.push(howItWorksCard());
     nodes.push(changelogCard());
-    return nodes;
+    const sendSug = async (body) => (REGISTRY_URL ? registry.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, app: 'quiz' }) }) : 'nourl');
+    const who = () => (state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : 'Unknown');
+    return [bpupkhShell(nodes, contribCard(), suggestCard(sendSug, who))];
   }
 
   /** Workflow, where data lives, and how to move progress to another device. */
@@ -1181,7 +1487,7 @@
   function changelogCard() {
     return h('section', { class: 'card', id: 'changelog' },
       h('details', {},
-        h('summary', { text: `Changelog (latest: ${CHANGELOG[0].date}, build h)` }),
+        h('summary', { text: `Changelog (latest: ${CHANGELOG[0].date}, build s)` }),
         CHANGELOG.map((e) => h('div', { class: 'cl-entry' },
           h('h3', { text: e.date }),
           h('ul', {}, e.items.map((t) => h('li', { text: t })))))));
@@ -1223,11 +1529,12 @@
   /** The whole question database, filterable by status, category and text. */
   function viewBrowse() {
     const f = state.ui.filter;
-    const categories = sortedUnique(state.questions.map((q) => q.category));
-    const sources = sortedUnique(state.questions.map((q) => q.source));
+    const inTab = scopeQs();
+    const categories = sortedUnique(inTab.map((q) => q.category));
+    const sources = sortedUnique(inTab.map((q) => q.source));
     const totalBy = (key) => {
       const m = new Map();
-      for (const q of state.questions) m.set(q[key], (m.get(q[key]) || 0) + 1);
+      for (const q of inTab) m.set(q[key], (m.get(q[key]) || 0) + 1);
       return m;
     };
     const catTotals = totalBy('category');
@@ -1300,7 +1607,7 @@
             state.edits[q.id] && h('span', { class: 'badge edited', text: 'Edited' }),
             statusBadge(s))
         ),
-        h('p', { class: 'question-text', text: q.question }),
+        stemNodes(q),
         staticOptions(q, undefined, f.reveal),
         f.reveal && aiNote(q),
         f.reveal && explanationNode(q)
@@ -1312,6 +1619,7 @@
           on: { click: () => { editingId = q.id; note.textContent = ''; paint(); } },
         })));
       }
+      li.append(reportControl(q));
       return li;
     };
 
@@ -1319,13 +1627,13 @@
       f.status = status.value;
       f.query = query.value;
       const needle = f.query.trim().toLowerCase();
-      const rows = state.questions.filter((q) => {
+      const rows = inTab.filter((q) => {
         const s = state.progress[q.id] || 'unattempted';
         return (f.status === 'all' || s === f.status)
-          && inSet(f.cats, q.category) && inSet(f.srcs, q.source)
+          && inSet(f.cats, q.category) && inSet(f.srcs, q.source) && inTj(f.tj, q)
           && (!needle || q.question.toLowerCase().includes(needle) || q.id.toLowerCase() === needle);
       });
-      count.textContent = `Showing ${rows.length} of ${state.questions.length} questions.`;
+      count.textContent = `Showing ${rows.length} of ${inTab.length} questions.`;
       list.replaceChildren(...(rows.length
         ? rows.map(itemNode)
         : [h('li', { class: 'muted', text: 'No questions match these filters.' })]));
@@ -1340,6 +1648,7 @@
     const srcGroup = multiCheck('b-src', 'Sources',
       sources.map((v) => ({ value: v, label: () => `${v} (${srcTotals.get(v)})` })),
       () => f.srcs, (v) => { f.srcs = v; }, () => { srcGroup.refresh(); paint(); });
+    const tjGroup = tjFilter('b', () => f.tj, (i, code) => inTab.filter((q) => tjOf(q, i) === code).length, () => { tjGroup.refresh(); paint(); });
     paint();
 
     const field = (label, id, control) => h('div', {}, h('label', { for: id, text: label }), control);
@@ -1353,10 +1662,122 @@
         ),
         catGroup.node,
         srcGroup.node,
+        tjGroup.node,
         h('label', { class: 'inline-check', for: 'b-reveal' }, revealBox, 'Show correct answers and explanations'),
         count,
         note
       ),
+      list,
+    ];
+  }
+
+  /* ---- print / save as PDF ---- */
+  function printSheet(qs, opts) {
+    const who = state.user ? state.user.name : '';
+    const tabName = (TABS.find(([id]) => id === state.tab) || [])[1] || '';
+    const item = (q, n) => h('li', { class: 'p-item' },
+      h('p', { class: 'p-head', text: `${n}. ${labelOf(q)}` }),
+      stemNodes(q),
+      h('ol', { class: 'p-options', type: 'A' }, q.options.map((text, i) => h('li', {}, h('span', { text }), optionImage(q, i)))),
+      opts.key && h('p', { class: 'p-key' }, h('b', { text: 'Answer: ' }), `${letter(q.correctIndex)}. ${q.options[q.correctIndex]}`),
+      opts.key && q.aiGenerated && h('p', { class: 'p-note', text: 'AI-generated answer: verify before relying on it.' }),
+      opts.expl && (q.explanation || (q.explanationImages && q.explanationImages.length)) && h('div', { class: 'p-expl' },
+        h('b', { text: 'Explanation: ' }), q.explanation && h('span', { text: q.explanation }), imageNodes(q.explanationImages, 'Explanation image')));
+    return h('div', { id: 'print-root' },
+      h('h1', { text: `Quiz Time: ${tabName}` }),
+      h('p', { class: 'p-meta', text: `${qs.length} question(s)${who ? ` · ${who}` : ''} · ${new Date().toLocaleDateString()}${opts.key ? ' · with answer key' : ' · without answer key'}${opts.expl ? ' and explanations' : ''}` }),
+      h('ol', { class: 'p-list' }, qs.map((q, i) => item(q, i + 1))));
+  }
+
+  function doPrint(qs, opts) {
+    const old = document.getElementById('print-root');
+    if (old) old.remove();
+    const root = printSheet(qs, opts);
+    document.body.append(root);
+    document.body.classList.add('printing');
+    const cleanup = () => { document.body.classList.remove('printing'); root.remove(); window.removeEventListener('afterprint', cleanup); };
+    window.addEventListener('afterprint', cleanup);
+    const imgs = [...root.querySelectorAll('img')];
+    imgs.forEach((im) => { im.loading = 'eager'; });
+    Promise.all(imgs.map((im) => (im.decode ? im.decode().catch(() => null) : null))).then(() => setTimeout(() => window.print(), 50));
+  }
+
+  function viewPrint() {
+    const f = state.ui.print;
+    const inTab = scopeQs();
+    const categories = sortedUnique(inTab.map((q) => q.category));
+    const sources = sortedUnique(inTab.map((q) => q.source));
+    const totalBy = (key) => { const m = new Map(); for (const q of inTab) m.set(q[key], (m.get(q[key]) || 0) + 1); return m; };
+    const catTotals = totalBy('category'); const srcTotals = totalBy('source');
+    const status = h('select', { id: 'p-status' },
+      h('option', { value: 'all', text: 'All statuses (done and not done)' }),
+      h('option', { value: 'unattempted', text: STATUS_LABEL.unattempted }),
+      h('option', { value: 'correct', text: STATUS_LABEL.correct }),
+      h('option', { value: 'incorrect', text: STATUS_LABEL.incorrect }));
+    const query = h('input', { id: 'p-query', type: 'text', placeholder: 'Search question text', autocomplete: 'off' });
+    status.value = f.status; query.value = f.query;
+    const keyBox = h('input', { id: 'p-key', type: 'checkbox', checked: f.key });
+    const explBox = h('input', { id: 'p-expl', type: 'checkbox', checked: f.expl });
+    const info = h('p', { class: 'muted', id: 'p-count', role: 'status' });
+    const list = h('ul', { class: 'review', id: 'p-list' });
+    const printBtn = h('button', { class: 'btn primary', type: 'button', id: 'p-go', text: 'Print / Save as PDF' });
+    let shown = [];
+
+    const refreshInfo = () => {
+      info.textContent = `${f.sel.size} selected · ${shown.length} shown of ${inTab.length} questions.`;
+      printBtn.disabled = f.sel.size === 0;
+    };
+    const paint = () => {
+      f.status = status.value; f.query = query.value;
+      const needle = f.query.trim().toLowerCase();
+      shown = inTab.filter((q) => {
+        const st = state.progress[q.id] || 'unattempted';
+        return (f.status === 'all' || st === f.status) && inSet(f.cats, q.category) && inSet(f.srcs, q.source) && inTj(f.tj, q)
+          && (!needle || q.question.toLowerCase().includes(needle) || q.id.toLowerCase() === needle);
+      });
+      list.replaceChildren(...(shown.length ? shown.map((q) => {
+        const cb = h('input', { type: 'checkbox', 'data-id': q.id, checked: f.sel.has(q.id) });
+        cb.addEventListener('change', guard(() => { if (cb.checked) f.sel.add(q.id); else f.sel.delete(q.id); refreshInfo(); }));
+        return h('li', { class: 'review-item p-pick' },
+          h('label', { class: 'inline-check' }, cb,
+            h('span', {}, h('b', { text: `${labelOf(q)} ` }), statusBadge(state.progress[q.id] || 'unattempted'),
+              h('span', { class: 'p-snippet', text: q.question.length > 160 ? `${q.question.slice(0, 160)}…` : q.question }))));
+      }) : [h('li', { class: 'muted', text: 'No questions match these filters.' })]));
+      refreshInfo();
+    };
+    status.addEventListener('change', guard(paint));
+    query.addEventListener('input', guard(paint));
+    keyBox.addEventListener('change', guard(() => { f.key = keyBox.checked; }));
+    explBox.addEventListener('change', guard(() => { f.expl = explBox.checked; }));
+    const catGroup = multiCheck('p-cat', 'Categories',
+      categories.map((c) => ({ value: c, label: () => `${c} (${catTotals.get(c)})` })),
+      () => f.cats, (v) => { f.cats = v; }, () => { catGroup.refresh(); paint(); });
+    const srcGroup = multiCheck('p-src', 'Sources',
+      sources.map((v) => ({ value: v, label: () => `${v} (${srcTotals.get(v)})` })),
+      () => f.srcs, (v) => { f.srcs = v; }, () => { srcGroup.refresh(); paint(); });
+    const tjGroup = tjFilter('p', () => f.tj, (i, code) => inTab.filter((q) => tjOf(q, i) === code).length, () => { tjGroup.refresh(); paint(); });
+    paint();
+    printBtn.addEventListener('click', guard(() => {
+      const qs = inTab.filter((q) => f.sel.has(q.id));
+      if (!qs.length) return;
+      if (qs.length > 300 && !window.confirm(`${qs.length} questions is a long document. Continue?`)) return;
+      doPrint(qs, { key: keyBox.checked, expl: explBox.checked });
+    }));
+    const selShown = h('button', { class: 'btn', type: 'button', id: 'p-sel-all', text: 'Select all shown', on: { click: () => { shown.forEach((q) => f.sel.add(q.id)); paint(); } } });
+    const selNone = h('button', { class: 'btn', type: 'button', id: 'p-sel-none', text: 'Clear selection', on: { click: () => { f.sel.clear(); paint(); } } });
+    const field = (label, id, control) => h('div', {}, h('label', { for: id, text: label }), control);
+    return [
+      backButton(),
+      h('section', { class: 'card' },
+        h('h2', { text: `Print questions (${(TABS.find(([id]) => id === state.tab) || [])[1]})` }),
+        h('p', { class: 'muted', text: 'Filter, tick the questions you want, then print. In the print window choose "Save as PDF" as the destination.' }),
+        h('div', { class: 'filters' }, field('Status', 'p-status', status), field('Search', 'p-query', query)),
+        catGroup.node, srcGroup.node, tjGroup.node,
+        h('label', { class: 'inline-check', for: 'p-key' }, keyBox, 'Include answer key'),
+        h('label', { class: 'inline-check', for: 'p-expl' }, explBox, 'Include explanations'),
+        h('div', { class: 'row' }, selShown, selNone),
+        info,
+        h('div', { class: 'form-actions' }, printBtn)),
       list,
     ];
   }
@@ -1432,6 +1853,27 @@
   }
 
   /** Exam screen: no feedback, free navigation, marks. Grading happens on submit. */
+  /* ---- exam timer ---- */
+  let tickHandle = null;
+  function fmtClock(ms) {
+    const t = Math.max(0, Math.ceil(ms / 1000));
+    const hh = Math.floor(t / 3600); const mm = Math.floor((t % 3600) / 60); const ss = t % 60;
+    const p = (n) => String(n).padStart(2, '0');
+    return hh ? `${hh}:${p(mm)}:${p(ss)}` : `${p(mm)}:${p(ss)}`;
+  }
+  function stopTicker() { if (tickHandle) { clearInterval(tickHandle); tickHandle = null; } }
+  function startTicker() {
+    stopTicker();
+    tickHandle = setInterval(() => {
+      const sess = state.session;
+      if (state.machine !== 'ACTIVE' || !sess || !sess.limit || sess.submitted) { stopTicker(); return; }
+      const left = sess.endAt - Date.now();
+      const el = document.getElementById('exam-timer');
+      if (el) { el.textContent = fmtClock(left); el.classList.toggle('low', left <= 60000); }
+      if (left <= 0) { stopTicker(); submitExam(); }
+    }, 1000);
+  }
+
   function viewActive() {
     const s = state.session;
     const q = currentQuestion();
@@ -1441,6 +1883,8 @@
     const markedCount = s.ids.filter((id) => s.marked[id]).length;
     const isMarked = Boolean(s.marked[q.id]);
 
+    const timerNode = s.limit ? h('span', { class: 'badge timer', id: 'exam-timer', role: 'timer', text: fmtClock(s.endAt - Date.now()) }) : null;
+    if (timerNode) startTicker(); else stopTicker();
     const track = h('div', { class: 'bar thin', role: 'img', 'aria-label': `${answeredCount} of ${total} answered` });
     const fill = h('span', { class: 'seg fill' });
     fill.style.width = `${(answeredCount / total) * 100}%`;
@@ -1453,7 +1897,7 @@
         on: { click: () => selectOption(i) },
       },
         h('span', { class: 'letter', text: letter(i) }),
-        h('span', { text }),
+        h('span', {}, h('span', { text }), optionImage(q, i)),
         chosen === i && h('span', { class: 'mark', 'aria-hidden': 'true', text: '●' })
       )
     )));
@@ -1489,10 +1933,11 @@
       h('section', { class: 'card' },
         h('div', { class: 'q-head' },
           h('span', { text: `Question ${s.index + 1} of ${total}` }),
+          timerNode,
           h('span', { class: 'badge', text: labelOf(q) })
         ),
         track,
-        h('p', { class: 'question-text', text: q.question }),
+        stemNodes(q),
         options,
         h('div', { class: 'row between form-actions' },
           h('button', {
@@ -1552,11 +1997,12 @@
         const wrong = answered && chosen !== q.correctIndex;
         return h('li', { class: `review-item${reveal && wrong ? ' wrong' : ''}` },
           h('div', { class: 'q-head' }, h('span', { text: `Question ${ids.indexOf(q.id) + 1} · ${labelOf(q)}` })),
-          h('p', { class: 'question-text', text: q.question }),
+          stemNodes(q),
           staticOptions(q, chosen, reveal),
           reveal && aiNote(q),
           reveal && wrong && h('p', { class: 'your-answer', text: `Your answer: ${letter(chosen)}. ${q.options[chosen]}` }),
-          reveal && explanationNode(q, true)
+          reveal && explanationNode(q, true),
+          reportControl(q)
         );
       }) : [h('li', { class: 'muted', text: 'None.' })]));
     };
@@ -1614,10 +2060,11 @@
           h('div', { class: 'form-actions' },
             h('button', { class: 'btn primary', type: 'button', id: 'hist-retake', text: 'Retake same questions',
               on: { click: () => startFromIds(e.ids) } }))),
+        tinjauanSection(e.ids.map((id) => state.byId.get(id)).filter(Boolean), answers),
         reviewSection(e.ids, answers, true),
       ];
     }
-    const rows = state.history.map((e, i) => ({ e, i })).reverse().map(({ e, i }) => {
+    const rows = tabHistory().reverse().map(({ e, i }) => {
       const { correct, known } = histScore(e);
       return h('li', { class: 'hist-item' },
         h('div', {},
@@ -1661,6 +2108,7 @@
           h('button', { class: 'btn primary', type: 'button', id: 'done', text: 'Back to menu', on: { click: leaveTest } }),
           h('button', { class: 'btn', type: 'button', id: 'retake', text: 'Retake same questions', on: { click: retakeFromResults } }))
       ),
+      tinjauanSection(items, answers),
       reviewSection(ids, answers),
     ];
   }

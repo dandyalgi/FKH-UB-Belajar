@@ -1,0 +1,25 @@
+/* BPUPKH seal in the header + the three-column main menu (Contributors | menu | Suggestions). Colours come from style.css. */
+.brandbar{display:flex;align-items:center;gap:14px;max-width:1200px;margin:0 auto}
+.brandbar img{width:68px;height:68px;flex:none}
+.brandbar h1{margin:0}
+.brandbar small{display:block;font-size:.78rem;letter-spacing:.08em;color:var(--muted,var(--mut))}
+body{overflow-x:clip}
+.shell{width:min(1200px,calc(100vw - 32px));margin-left:calc(50% - min(600px,50vw - 16px));display:grid;gap:16px;grid-template-columns:minmax(0,1fr);align-items:start}
+.shell>.mainCol,.shell>aside{display:grid;gap:16px;min-width:0;grid-template-columns:minmax(0,1fr)}
+.shell>.mainCol .card,.shell>aside .card{margin-bottom:0}
+.contrib-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.contrib-list li{padding-bottom:8px;border-bottom:1px solid var(--border,var(--bd))}
+.contrib-list li:last-child{border-bottom:0;padding-bottom:0}
+.contrib-list b{display:block}
+.contrib-list span{display:block;font-size:.9rem;color:var(--muted,var(--mut))}
+.sug-form textarea,.sug-form select,.sug-form input[type=text]{width:100%;font:inherit;padding:9px 10px;border-radius:8px;border:1px solid var(--border,var(--bd));background:var(--bg);color:var(--fg)}
+.sug-form label{display:block;margin-top:10px;font-weight:600;font-size:.9rem}
+.sug-form textarea{min-height:96px}
+input[type=password]{width:100%;font:inherit;padding:9px 10px;border-radius:8px;border:1px solid var(--border,var(--bd));background:var(--bg);color:var(--fg)}
+@media(min-width:1000px){.shell{grid-template-columns:230px minmax(0,1fr) 290px}.shell>aside{position:sticky;top:12px}.shell>.left{order:-1}}
+@media(max-width:999px){.shell>.right{order:2}.shell>.left{order:3}}
+.sel{flex-wrap:wrap}.sel select{min-width:0;max-width:100%;flex:1 1 12rem}
+.contrib-group summary{cursor:pointer}
+.contrib-group summary b{display:inline}
+.contrib-members{list-style:none;margin:6px 0 0;padding:0 0 0 12px;display:grid;gap:4px;font-size:.92rem}
+.contrib-list .contrib-members li{padding:0;border:0}

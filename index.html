@@ -3,18 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' https://script.google.com https://script.googleusercontent.com">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' https://script.google.com https://script.googleusercontent.com; img-src 'self' data:">
   <title>Quiz Trainer</title>
-  <link rel="stylesheet" href="style.css?v=20261107h">
+  <link rel="icon" href="seal.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css?v=20261122s">
+  <link rel="stylesheet" href="layout.css?v=20261122s">
 </head>
 <body>
   <header class="topbar">
-    <h1>Quiz Trainer</h1>
+    <div class="brandbar"><img src="seal.svg" alt="" width="68" height="68"><div><h1>Quiz Trainer</h1><small>BPUPKH · FKH UB · PPDH XVIII</small></div></div>
   </header>
   <main id="app" class="container">
     <noscript><p class="status">This app needs JavaScript enabled.</p></noscript>
   </main>
-  <script src="config.js?v=20261107h" defer></script>
-  <script src="app.js?v=20261107h" defer></script>
+  <script src="config.js?v=20261122s" defer></script>
+  <script src="contributors.js?v=20261122s" defer></script>
+  <script src="app.js?v=20261122s" defer></script>
 </body>
 </html>
