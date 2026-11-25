@@ -1,255 +1,1496 @@
 (() => {
   'use strict';
-  const DATA_URL = 'cases.enc'; // AES-GCM encrypted case database (see encrypt-data.js)
-  const KEY_STORE = 'osce.key.v1';
-  const T = { brief: 120, exam: 1080 }; // seconds: examinee reads (2 min), examiner stage (18 min = former 15 + 3)
-  const REMINDERS = [{ left: 600, msg: '10 minutes remaining', bells: 1 }, { left: 300, msg: '5 minutes remaining', bells: 2 }, { left: 180, msg: '3 minutes remaining', bells: 3 }]; // shown during the 18-minute stage
-  const app = document.getElementById('app');
-  const NAME_KEY = 'osce.name.v1', HIST_KEY = 'osce.history.v1', HIST_MAX = 200;
-  const store = {
-    read(k, d) { try { const r = window.localStorage.getItem(k); return r === null ? d : JSON.parse(r); } catch (_) { return d; } },
-    write(k, v) { try { window.localStorage.setItem(k, JSON.stringify(v)); return true; } catch (_) { return false; } },
-  };
-  const st = { cases: [], byId: new Map(), timerOn: true, caseId: null, reveal: false, source: '', key: null, opened: new Set(), assessOn: true, chk: new Set(), xchk: new Set(), ovr: {}, user: null, visitors: null, panelMin: false, name: String(store.read(NAME_KEY, '') || '').slice(0, 60), entry: null };
-  const loadHist = () => { const r = store.read(HIST_KEY, []); return Array.isArray(r) ? r.filter((e) => e && typeof e.id === 'string' && Number.isFinite(e.t) && typeof e.name === 'string').slice(-HIST_MAX) : []; };
-  const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
-  const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
+
+  /* ======================================================================
+   * Config
+   * ==================================================================== */
+  const BANK_URL = 'bank.enc'; // AES-GCM encrypted question bank (see encrypt-bank.js)
+  const FETCH_TIMEOUT_MS = 10000;
+  const DEFAULT_COUNT = 10;
+  /** Google Apps Script web-app URL that stores participant names (see config.js). Empty = names stay on this device only. */
+  const REGISTRY_URL = String((window.QUIZ_CONFIG && window.QUIZ_CONFIG.registryUrl) || '');
+  /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
-    { v: 'v40', d: '2026-11-25', items: ['Admins (set by the owner) can close, reopen and delete report threads, hide comments, and edit a case (scenario, anamnesis, test text, diagnosis, treatment, prescription…) from a thread or from All questions. Edits are saved for everyone, marked “Edited by admin” with a visible history. Admins can add other admins in the new Admin tab. Your device ID is shown on the main screen.', 'The “View the case now” button in report threads is now much easier to see.'] },
-    { v: 'v39', d: '2026-11-25', items: ['Reply to a comment: tap “↩ Reply” under any comment. The person you reply to is tagged and gets a notification in the 🔔 list.', 'Fixed: the 🔔 button now shows right after you sign in, without opening Reports & Discussion first.'] },
-    { v: 'v38', d: '2026-11-25', items: ['Report a case: a “Report this case” button under every case in All questions and at the end of a session (also in single-player mode). Choose what is wrong and add a comment.', 'New “Reports & Discussion” tab at the top (next to All questions): all reports in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, see the reporter, give a thumbs up or down, and comment.', 'A 🔔 button at the top right lists new thumbs up/down and comments on your own reports; tap one to open that thread.'] },
-    { v: 'v35', d: '2026-11-22', items: ['TO NAS NOVEMBER 2026 cases: lab results that only said up/down now show example values with reference ranges (marked as AI-created example data).'] },
-    { v: 'v34', d: '2026-11-21', items: ['Added 3 cases from Agha Thariq Sugijanto (Addison, EPI, Cushing; 30 cases total). Agha added to the contributors list.'] },
-    { v: 'v33', d: '2026-11-21', items: ['Time reminders are now bell sounds only (no voice): 1 strike at 10 minutes left, 2 at 5, 3 at 3, 2 when reading time ends, 4 when the exam time is up. On-screen notices stay.'] },
-    { v: 'v32', d: '2026-11-21', items: ['TO NAS cases corrected against the original PDFs: full original scenario wording; Ancylostomiasis scenario and CBC now follow Undana; NSHP case diagnosis follows Undikma; extra source versions noted in the prescription notes.'] },
-    { v: 'v31', d: '2026-11-21', items: ['Added 8 cases from TO NAS NOVEMBER 2026: EPI, Cushing, Ancylostomiasis, bacterial cystitis, pseudomembranous cystitis, megacolon, MMVD, rickets (27 cases total).'] },
-    { v: 'v30', d: '2026-11-21', items: ['Assessment form scale changed: total 400, pass at 250 (was 800 / 550). Same 9 rows and scoring rules; saved sessions are recalculated automatically.'] },
-    { v: 'v29', d: '2026-11-20', items: ['Time reminders are now spoken (Indonesian voice): “Sisa waktu sepuluh / lima / tiga menit” and “Waktu habis”, with the on-screen notice. Browsers without speech use a beep.', 'New “Back up your progress” card on the main menu: Export progress (a .json file with your history) and Import progress (merge, or replace the current history).'] },
-    { v: 'v28', d: '2026-11-20', items: ['Examiner mode: the 15-minute stage and the 3-minute segment outside the app are now one 18-minute stage. Reminders pop up with 10, 5 and 3 minutes left. When the time runs out the app moves to the next stage by itself, after the 2-minute reading time as well as after the 18 minutes. Skip timer still lets you carry on without a timer.', 'Stage numbers are now 1 reading · 2 examiner · 3 assessment form · 4 results (3 stages without the assessment form).'] },
-    { v: 'v27', d: '2026-11-20', items: ['New Single-player mode (button on the main menu): do a case on your own without an examiner, in three stages. 1) Read the case (2 min). 2) Work through six steps in 18 min: history-taking by chatting with the owner (replies when your question contains the right keywords), physical examination form, differential diagnosis and diagnostic tests (many decoys; after 5 tests further ones are flagged), final diagnosis and prognosis, treatment and prescription, client education. 3) No timer: your answers next to the answer key, plus the history questions you did not ask and the tests you did not look at. No scoring rubric. When a timer runs out the app moves on by itself.'] },
-    { v: 'v26', d: '2026-11-20', items: ['Back to the original look; only the BPUPKH seal was kept in the header.'] },
-    { v: 'v25', d: '2026-11-20', items: ['Assessment form replaced with the Kertas Kerja Penilai OSCE UKMPPDH 2025: 9 rows scored 1–4 by the form’s descriptors, total 800, pass at 550 (St.1 Komunikasi 20%, St.2 Diagnosa Klinik 50%, St.3 Reseptir & Terapeutik 30%).', 'Extra checklist: removed the items that the new form already covers (permission, kindness/welfare, examination order and technique, specific tests, zoonosis education, restraint, not leaving the animal alone).', 'Sessions saved with the old 400-point form still open in History with their old scores; participant reports now count only sessions with the new form.'] },
-    { v: 'v24', d: '2026-11-20', items: ['The BPUPKH seal is now in the header.', 'Main menu: a Contributors list on the left and a Suggestions panel on the right (suggestions or a Google Drive link with cases).'] },
-    { v: 'v23', d: '2026-11-07', items: ['Participant reports: two new graphs, score over time (with the pass line) and number of missed checklist items over time.'] },
-    { v: 'v22', d: '2026-11-07', items: ['New case No. 19 (External 2 Batch 1): Cat Shiro, 3.5 years, FLUTD / urolithiasis. Diagnosis, prognosis, therapy, prescription and education were written by AI (labelled); test results and images are from the source.'] },
-    { v: 'v21', d: '2026-11-06', items: ['Missing numeric tests added with example values (labelled “Example data created by AI”): CBC for No. 17; Hematologi for No. 16; Kimia darah for Nos. 5, 6, 9, 10, 14. Existing results were not changed.'] },
-    { v: 'v20', d: '2026-11-06', items: [
-      'Stage 4 now has the examiner’s answer key (scenario & anamnesis, physical exam, diagnostic tests with accessed / not accessed, diagnosis, differential, prognosis, therapy, prescription, education), grouped and collapsed.',
-      'Extra checklist: added DO / DON’T items (preparation, asking permission, examination order, explanations, things to avoid). Still not scored.' ] },
-    { v: 'v19', d: '2026-11-05', items: [
-      'Assessment now follows your teacher’s form: 10 rows scored 1–4, total out of 400, pass at 250 or more (Lulus / Tidak lulus).',
-      'Each row’s score is suggested from the ticked items (none = 1, one = 2, some = 3, all = 4); the examiner can set any row by hand (Auto / Skor 1–4).',
-      'Sessions saved with the earlier rubric (v15–v18) are kept in History but no longer show assessment scores.' ] },
-    { v: 'v18', d: '2026-11-05', items: [
-      'Extra checklist (preparation, biosafety & restraint, clinical procedure), kept separate from stations 1–3: not scored, with its own “Belum dilakukan” list in the results and its own most-missed list in participant reports.',
-      'Visitor list: name and university are asked once after login and recorded in a Google Sheet; the menu shows how many participants have used OSCE Practice.' ] },
-    { v: 'v15', d: '2026-11-05', items: [
-      'Optional checklist assessment form (in Indonesian): choose it when starting a session.',
-      'Floating, minimizable checklist in stages 2–3, with all stations in collapsible groups.',
-      'New stage before the results to finish the checklist; the results show the scores and what was not done.',
-      'History: participant reports with average scores and the criteria most often missed, as PDF.' ] },
-    { v: 'v14', d: '2026-11-05', items: ['Treatment, prognosis, prescription and education written by AI (cases 14–18) are labelled “Answers created by AI”.'] },
-    { v: 'v13', d: '2026-11-05', items: [
-      'Stage 2 shows the written result for tests that have no image (for example an ECG); tests with an image still show only the image.',
-      'Tests with a specific target now name it (for example “Test kit FIV / FeLV”, “PCR FeLV”).',
-      '5 new cases from the 12 April 2026 national try-out (Nos. 14–18); the UNAIR Doberman case was merged into No. 16 as supplementary data.',
-      'Missing treatment completed from the Merck/MSD Veterinary Manual and other cited references (see References in each case).' ] },
-    { v: 'v12', d: '2026-11-05', items: [
-      'Stage 2 lab tables show Increased / Decreased / Normal again, colour-coded next to the reference range (written findings stay hidden).',
-      'Every case has a number. Cases you have finished are marked green with a ✓ in the case list and in All questions.' ] },
-    { v: 'v11', d: '2026-11-05', items: [
-      'Stage 2 shows no written result text; findings and explanations appear only in stage 4 and in All questions.',
-      'Stage 2 remembers which supplementary examinations you opened.',
-      'Stage 4 now has the same full layout as All questions (scenario, history, every test result, answer key) and marks each test as accessed in stage 2 or not.',
-      'History and PDF use the same layout and keep the accessed/not accessed marks.' ] },
-    { v: 'v10', d: '2026-11-05', items: ['Image results show only the image during the exam.'] },
-    { v: 'v9', d: '2026-11-05', items: [
-      'Changelog added.',
-      'Enter the participant’s name before a session; the 2-minute reading time starts only after you confirm.',
-      'The case text and all physical examination findings are shown in the 2-minute stage, and the case text stays visible in the 15-minute stage.',
-      'New “All questions” menu: scenario, physical examination, anamnesis, test results, explanations, diagnosis, prescription and more for every case.',
-      'New “History” menu: every finished session in the answer-key layout, with Save as PDF for one session or the whole history.',
-      'Image clean-up: device labels, watermarks and test names removed; circles and arrows kept.' ] },
-    { v: 'v8', d: '2026-11-05', items: ['Login page and menus in English.'] },
-    { v: 'v1–v7', d: '2026-11-04', items: [
-      'First release: 4 stages (2 min read, 15 min examiner, 3 min outside the app, answer key) with optional timers and a Skip timer button.',
-      'Test results open on their own page; lab results shown as tables with reference ranges and interpretation.',
-      '13 cases from the FKH UB simulation and the October 2025 collection; encrypted case database with login.' ] },
+    { date: '2026-11-25', items: [
+      'Admins (set by the owner) can close, reopen and delete report threads, hide comments, and edit a question (text, options, answer key, explanation) straight from a thread or from Browse. Edits are saved for everyone, marked “Edited by admin” with a visible history, and your progress is re-graded if the key changed. Admins can add other admins in the new Admin tab. Your device ID is shown on the main screen.',
+      'The “View the question now / as reported” buttons in report threads are now much easier to see.',
+      'Reply to a comment: tap “↩ Reply” under any comment. The person you reply to is tagged and gets a notification in the 🔔 list.',
+      'Fixed: the 🔔 button now shows right after you sign in, without opening Reports & Discussion first.',
+      'Added 475 questions from TO NAS November 2026: FIKKIA (73), UNUD (95), USK (93) and UB (214). They also show up in Fokus UKMPPDH.',
+      'New "Reports & Discussion" tab (top bar, next to Fokus UKMPPDH): see all question reports sent by everyone in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, and compare the reported version with the current answer key. You can give a thumbs up or down and comment on any report (comments show your name). A 🔔 button at the top right lists new thumbs up/down and comments on your own reports; tap one to open that thread. Reports for a question also appear under its explanation in the review after a test and in Browse ("Reports & discussion").',
+    ] },
+    { date: '2026-11-22', items: [
+      'Starting a test: questions are now chosen by the six tinjauan (each in its own block, with counts), instead of the old category list. Sources are in a separate block and there is a "Reset all filters" button.',
+    ] },
+    { date: '2026-11-22', items: [
+      'Added 97 questions (TO NAS November 2026, IPB) and 111 questions (TO NAS November 2026, UNAIR). Contributors added, with the Paw3r Rangers team as a dropdown.',
+    ] },
+    { date: '2026-11-22', items: [
+      'Optional timer in minutes when you start a test. The remaining time shows during the test and the test is submitted automatically when time is up.',
+      'New "Print / PDF" page: pick questions (done or not done, by category, source or tinjauan), choose whether to include the answer key and explanations, then print or save as PDF. It follows the selected tab.',
+      'Progress is shared by both tabs: answering a question in one tab updates it in the other.',
+    ] },
+    { date: '2026-11-22', items: [
+      'Two tabs at the top: "All questions" (every question and all progress) and "Fokus UKMPPDH" (only TO Nasional November 2026, SIGAP / External 1 from batch 49 and SuksesUKMPPDH / External 2 from batch 6). Progress, test setup, Browse and History follow the selected tab.',
+    ] },
+    { date: '2026-11-22', items: [
+      'Questions can now include images in the question, in each answer choice, and in the explanation (tap an image to enlarge it). Images are stored inside the encrypted question bank.',
+      'Every question now carries one label in each of six "tinjauan" (competency area, learning domain, recall/reasoning, species, disease group, and the 16 competencies). Labels were assigned automatically and may be corrected later.',
+      'Results and exam history show correct/total per row for each tinjauan.',
+      'Browse and the test setup can be filtered by any tinjauan.',
+    ] },
+    { date: '2026-11-21', items: ['Added Agha Thariq Sugijanto to the contributors list.'] },
+    { date: '2026-11-20', items: [
+      'Reporting a question now also works in All questions (Browse) and in the review of test results and history, not only during a test.',
+      'The BPUPKH seal is now in the header.',
+      'Main menu: a Contributors list on the left and a Suggestions panel on the right, where you can send a suggestion or a Google Drive link with questions and answer keys.' ] },
+    { date: '2026-11-07', items: [
+      'Three External 1 questions (Batches 40 and 43) were wrongly marked as AI-generated; they use the source key and explanation, so the AI note was removed.',
+      'New questions: "Tryout External 1 UKMPPDH Batch 47" (answer key and explanations from the source) and "Tryout External 2 UKMPPDH Batch 1" (answer key from the highlighted options in the source; some missing explanations were added by AI). 157 new questions; duplicates of existing questions were skipped, but their explanations were replaced when the new source had a fuller one.',
+      'Report a question: next to "Mark for review" there is now a "Report" button (incorrect question, answer choices, answer key, explanation, category, or other, plus an optional comment). Reports go to the admin\'s Google Sheet.',
+      'New "How Quiz Time works" card on the main menu: the workflow, where your data is stored, and how to move your progress to another device.' ] },
+    { date: '2026-11-05', items: [
+      'Source names: "Sigap" is now "External 1" (batch numbers unchanged).',
+      'The question code (for example q12) is shown next to the category and source.',
+      'Added this changelog to the main menu.',
+      'After login you enter your name and university once; the main menu shows how many participants have used Quiz Time.',
+      'All menus are now in English.' ] },
+    { date: '2026-11-04', items: [
+      'New checkbox when starting a test: include questions already answered correctly.',
+      'Exam history: see every finished exam (answered questions only) and retake the same questions.',
+      'Login now lasts for the current tab only; use Import / export to back up or move your progress.' ] },
+    { date: 'Earlier', items: [
+      'Question bank is encrypted and needs the ID and password.',
+      'Category and source selection with checkboxes, in the test form and in Browse.',
+      'Review after a test is grouped (incorrect, correct, unanswered) with an option to show answers and explanations.',
+      'Option to include AI-generated questions and answers.',
+      'Typos and broken options in the bank were fixed.' ] },
   ];
+  const MAX_OPTIONS = 5; // A to E
+  const ALL = '__all__';
+  const KEYS = Object.freeze({
+    progress: 'quiz.progress.v1', // { [questionId]: 'correct' | 'incorrect' }
+    session: 'quiz.session.v1',   // { ids: string[], index: number, answers: { [id]: number } }
+    key: 'quiz.key.v1',           // derived decryption key (base64); kept for this tab only (sessionStorage)
+    custom: 'quiz.custom.v1',     // questions imported in this browser
+    repseen: 'quiz.repseen.v1',   // { [reportId]: { up, down, c } } activity on my reports already seen
+    user: 'quiz.user.v1',         // { id, name } of the participant on this browser
+    edits: 'quiz.edits.v1',       // answer-key edits made in this browser
+    history: 'quiz.history.v1',   // [{ t, ids, a, tab }] completed exams, newest last
+    timer: 'quiz.timer.v1',       // last timer length in minutes (0 = none)
+    tab: 'quiz.tab.v1',           // 'all' | 'focus': the tab last used
+  });
+  const STATUS_LABEL = Object.freeze({
+    correct: 'Correct',
+    incorrect: 'Incorrect',
+    unattempted: 'Not attempted',
+  });
 
   class DataError extends Error {}
   class AuthError extends Error {}
 
-  /* ---- crypto: PBKDF2-SHA256 -> AES-256-GCM, key from "id:password" (same scheme as the quiz app) ---- */
+  /* ======================================================================
+   * Crypto: the bank is stored encrypted (PBKDF2-SHA256 -> AES-256-GCM).
+   * The key comes from "id:password", so the data is unreadable without them.
+   * ==================================================================== */
   const enc = new TextEncoder();
-  const b64d = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-  const b64e = (u8) => { let o = ''; for (let i = 0; i < u8.length; i += 0x8000) o += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(o); };
+  const b64d = (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
+  const b64e = (u8) => {
+    let out = '';
+    for (let i = 0; i < u8.length; i += 0x8000) out += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+    return btoa(out);
+  };
   async function deriveKey(id, password, env) {
     const base = await crypto.subtle.importKey('raw', enc.encode(`${id.trim().toLowerCase()}:${password}`), 'PBKDF2', false, ['deriveKey']);
-    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64d(env.salt), iterations: env.iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: b64d(env.salt), iterations: env.iter, hash: 'SHA-256' },
+      base, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
   }
   const importKey = (b64) => crypto.subtle.importKey('raw', b64d(b64), { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
-  async function decryptData(env, key) {
+  async function decryptBank(env, key) {
     let plain;
-    try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(env.iv) }, key, b64d(env.ct)); } catch (_) { throw new AuthError('wrong key'); }
-    try { return JSON.parse(new TextDecoder().decode(plain)); } catch (_) { throw new DataError(`${DATA_URL} is not valid JSON.`); }
+    try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(env.iv) }, key, b64d(env.ct)); }
+    catch (_) { throw new AuthError('wrong key'); }
+    try { return JSON.parse(new TextDecoder().decode(plain)); }
+    catch (_) { throw new DataError(`${BANK_URL} is not valid JSON.`); }
   }
-  async function fetchEnvelope() {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 30000);
-    try {
-      const res = await fetch(DATA_URL, { cache: 'no-cache', signal: ctrl.signal });
-      if (!res.ok) throw new DataError(`Could not load ${DATA_URL} (HTTP ${res.status}).`);
-      let env;
-      try { env = await res.json(); } catch (_) { throw new DataError(`${DATA_URL} is not valid.`); }
-      if (!env || !env.salt || !env.iv || !env.ct || !Number.isInteger(env.iter)) throw new DataError(`${DATA_URL} is not valid.`);
-      return env;
-    } catch (err) {
-      if (err instanceof DataError) throw err;
-      if (err && err.name === 'AbortError') throw new DataError('Loading timed out. Check your connection and retry.');
-      throw new DataError('Network error while loading cases. Check your connection and retry.');
-    } finally { clearTimeout(timer); }
+  async function encryptBank(env, key, data) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(data, null, 2) + '\n'));
+    return { v: 1, iter: env.iter, salt: env.salt, iv: b64e(iv), ct: b64e(new Uint8Array(ct)) };
   }
-  /** Login key lives in sessionStorage: closing the tab logs out. */
+
+  /* ======================================================================
+   * Storage (never throws)
+   * ==================================================================== */
+  const storage = (() => {
+    let available = true;
+    return {
+      read(key, fallback) {
+        let raw;
+        try { raw = window.localStorage.getItem(key); } catch (_) { available = false; return fallback; }
+        if (raw === null) return fallback;
+        try { return JSON.parse(raw); } catch (_) { return fallback; }
+      },
+      write(key, value) {
+        try { window.localStorage.setItem(key, JSON.stringify(value)); return true; }
+        catch (_) { available = false; return false; }
+      },
+      remove(key) {
+        try { window.localStorage.removeItem(key); } catch (_) { available = false; }
+      },
+      get available() { return available; },
+    };
+  })();
+
+  /** Login key lives in sessionStorage: closing the tab logs out, saved progress is untouched. */
   const sess = {
-    get() { try { return window.sessionStorage.getItem(KEY_STORE); } catch (_) { return null; } },
-    set(v) { try { window.sessionStorage.setItem(KEY_STORE, v); } catch (_) { /* login just won't survive a reload */ } },
-    clear() { try { window.sessionStorage.removeItem(KEY_STORE); } catch (_) { /* ignore */ } },
+    get() { try { return window.sessionStorage.getItem(KEYS.key); } catch (_) { return null; } },
+    set(v) { try { window.sessionStorage.setItem(KEYS.key, v); } catch (_) { /* login just won't survive a reload */ } },
+    clear() { try { window.sessionStorage.removeItem(KEYS.key); } catch (_) { /* ignore */ } },
+  };
+  storage.remove(KEYS.key); // earlier versions kept the key in localStorage
+
+  /* ======================================================================
+   * Pure helpers and domain logic (no DOM)
+   * ==================================================================== */
+  const isText = (v) => typeof v === 'string' && v.trim() !== '';
+  const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
+  const letter = (i) => String.fromCharCode(65 + i);
+  /**
+   * Six "tinjauan" (review dimensions). Each question carries one code per tinjauan
+   * in q.tj = [t1, t2, t3, t4, t5, t6]. Results and filters group by these codes.
+   */
+  const TINJAUAN = Object.freeze([
+    { n: 1, cats: [['1', 'Ketrampilan dasar klinis'], ['2', 'Aplikasi biomedis, perilaku hewan, klinis dan epidemiologi Veteriner'], ['3', 'Keterampilan Komunikasi Veteriner'], ['4', 'Manajemen kesehatan hewan'], ['5', 'Penelusuran, kritisi, dan manajemen informasi veteriner'], ['6', 'Profesionalisme, moral, dan etika praktik veteriner'], ['7', 'Kesadaran, pemeliharaan, dan pengembangan personal']] },
+    { n: 2, cats: [['K', 'Kognitif'], ['P', 'Psikomotor'], ['A', 'Afektif']] },
+    { n: 3, cats: [['Rc', 'Menghafal (Recall)'], ['Rs', 'Analitik/argumentasi (Reasoning)']] },
+    { n: 4, cats: [['Bsr', 'Hewan Besar (Hewan Produksi)'], ['Kes', 'Hewan Kesayangan & eksotik'], ['Lia', 'Satwa Liar & akuatik konservasi'], ['Ikn', 'Ikan'], ['Ung', 'Unggas'], ['Lain', 'Lain - lain']] },
+    { n: 5, cats: [['Inf', 'Penyakit infeksius (bakteri, virus, parasit, protozoa, jamur)'], ['NonI', 'Penyakit non infeksius (degeneratif, defisiensi nutrisi)'], ['Kulit', 'Penyakit Kulit'], ['Repro', 'Reproduksi dan Aplikasi Teknologi'], ['Kesmavet', 'Kesmavet dan Epidemiologi'], ['Lab', 'Diagnosa laboratorium (Patologi, Patologi klinik, Mikro, Parasit)'], ['Bedah', 'Bedah dan Radiologi'], ['OneH', 'One Health : emerging dan re-emerging disease'], ['Resep', 'Reseptir dan Kerumahsakitan']] },
+    { n: 6, cats: [['1', '1. Wawasan etika veteriner, hakikat sumpah dan kode etik profesi'], ['2', '2. Wawasan sistem kesehatan hewan nasional dan legislasi veteriner'], ['3', '3. Keterampilan tindakan medis yang lege-artis'], ['4', '4. Keterampilan menangani penyakit pada hewan besar, kecil, unggas, eksotik, satwa liar, akuatik dan laboratorium'], ['5A', '5A. Diagnosis klinik, laboratorik, patologik, dan epidemiologik'], ['5B', '5B. Penyusunan nutrisi untuk kesehatan dan gangguan medis'], ['5C', '5C. Pemeriksaan antemortem dan postmortem'], ['5D', '5D. Pemeriksaan kebuntingan, gangguan reproduksi dan aplikasi teknologi reproduksi'], ['5E', '5E. Pengawasan keamanan dan mutu produk hewan'], ['5F', '5F. Pengawasan dan pengendalian mutu obat hewan dan bahan biologis'], ['5G', '5G. Pengukuran (assesment) dan penyeliaan kesejahteraan hewan'], ['6', '6. Komunikasi profesional (professional communication/dialogue)'], ['7', '7. Pengendalian dan penanggulangan penyakit strategis, baru, zoonosis, transboundary, keamanan hayati'], ['8', '8. Transaksi terapeutik: anamnesis, rekam medis, informed consent, resep, surat keterangan, edukasi klien'], ['9', '9. Analisis risiko, analisis ekonomi veteriner, kewirausahaan'], ['10', '10. Manajerial dan kepemimpinan veteriner']] },
+  ]);
+  // Tinjauan 6 uses "1" and "6" etc. as its own codes; keep them apart from the tinjauan-1 codes by position.
+  const TJ_CODES = TINJAUAN.map((t) => new Set(t.cats.map((c) => c[0])));
+  const hasTj = (q) => Array.isArray(q.tj);
+  const tjOf = (q, i) => (hasTj(q) ? q.tj[i] : '');
+  /** tjSel = array of 6 (null = everything, or a Set of codes). */
+  const inTj = (tjSel, q) => !tjSel || tjSel.every((sel, i) => sel === null || sel.has(tjOf(q, i)));
+  const noTj = () => [null, null, null, null, null, null];
+
+  /**
+   * "Fokus UKMPPDH" tab: only questions whose source matches one of these rules.
+   *   SIGAP (External 1) from batch 49, SuksesUKMPPDH (External 2) from batch 6, TO Nasional November 2026.
+   * A source name must contain "External 1"/"SIGAP" (or "External 2"/"SuksesUKMPPDH") and "Batch <number>",
+   * or "TO NAS"/"TO Nasional" together with "November 2026".
+   */
+  const FOCUS_RULES = Object.freeze([
+    { re: /(?:external\s*1|sigap).*?batch\s*(\d+)/i, min: 49 },
+    { re: /(?:external\s*2|sukses\s*-?\s*ukmppdh).*?batch\s*(\d+)/i, min: 6 },
+    { re: /to\s*nas(?:ional)?.*?(?:nov|november)\s*2026/i, min: null },
+  ]);
+  const isFocusSource = (source) => FOCUS_RULES.some((r) => {
+    const m = r.re.exec(String(source));
+    return Boolean(m) && (r.min === null || Number(m[1]) >= r.min);
+  });
+  const TABS = Object.freeze([['all', 'All questions'], ['focus', 'Fokus UKMPPDH'], ['reports', 'Reports & Discussion']]);
+
+  /** An image source is either an embedded data URI or a plain relative file path (no scheme, no "..", no leading slash). */
+  const SAFE_IMG = /^(?:data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+|(?!.*\.\.)[A-Za-z0-9_][A-Za-z0-9_\-./]*\.(?:png|jpe?g|webp|gif|svg))$/i;
+  const cleanImgs = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && SAFE_IMG.test(x.trim())).map((x) => x.trim()) : []);
+  const cleanOptImgs = (v, n) => (Array.isArray(v) && v.length === n ? v.map((x) => (typeof x === 'string' && SAFE_IMG.test(x.trim()) ? x.trim() : '')) : null);
+
+  /** "Category · Source · code", where Source is "-" when the question has none. */
+  const labelOf = (q) => `${q.category} · ${q.source} · ${q.id}`;
+
+  function shuffle(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  /** Validates one raw question. Returns { value } (frozen) or { error }. */
+  function normalizeQuestion(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'not an object' };
+    if (!isText(raw.id)) return { error: 'missing "id"' };
+    if (!isText(raw.question)) return { error: 'missing "question"' };
+    if (!Array.isArray(raw.options) || raw.options.length < 2 || raw.options.length > MAX_OPTIONS || !raw.options.every(isText)) {
+      return { error: `"options" must be 2 to ${MAX_OPTIONS} non-empty strings (A to ${letter(MAX_OPTIONS - 1)})` };
+    }
+    if (!Number.isInteger(raw.correctIndex) || raw.correctIndex < 0 || raw.correctIndex >= raw.options.length) {
+      return { error: '"correctIndex" must be a whole number pointing to an option (null is not allowed)' };
+    }
+    return {
+      value: Object.freeze({
+        id: raw.id.trim(),
+        category: isText(raw.category) ? raw.category.trim() : 'Uncategorized',
+        source: isText(raw.source) ? raw.source.trim() : '-',
+        question: raw.question,
+        options: Object.freeze([...raw.options]),
+        correctIndex: raw.correctIndex,
+        explanation: typeof raw.explanation === 'string' ? raw.explanation : '',
+        aiGenerated: raw.aiGenerated === true,
+        images: Object.freeze(cleanImgs(raw.images)),
+        explanationImages: Object.freeze(cleanImgs(raw.explanationImages)),
+        optionImages: cleanOptImgs(raw.optionImages, raw.options.length) && Object.freeze(cleanOptImgs(raw.optionImages, raw.options.length)),
+        tj: Array.isArray(raw.tj) && raw.tj.length === 6 && raw.tj.every((c, i) => TJ_CODES[i].has(String(c))) ? Object.freeze(raw.tj.map(String)) : null,
+      }),
+    };
+  }
+
+  function parseBank(raw) {
+    if (!Array.isArray(raw)) throw new DataError(`${BANK_URL} must contain a JSON array of questions.`);
+    const valid = [];
+    const problems = [];
+    const seen = new Set();
+    raw.forEach((item, i) => {
+      const label = item && typeof item.id === 'string' ? item.id : `#${i + 1}`;
+      const r = normalizeQuestion(item);
+      if (r.error) { problems.push(`${label}: ${r.error}`); return; }
+      if (seen.has(r.value.id)) { problems.push(`${label}: duplicate id`); return; }
+      seen.add(r.value.id);
+      valid.push(r.value);
+    });
+    if (!valid.length) throw new DataError(`${BANK_URL} has no valid questions.`);
+    return { valid, problems };
+  }
+
+  function computeStats(questions, progress) {
+    const total = { total: 0, correct: 0, incorrect: 0, unattempted: 0 };
+    const cats = new Map();
+    for (const q of questions) {
+      const s = progress[q.id] || 'unattempted';
+      if (!cats.has(q.category)) {
+        cats.set(q.category, { category: q.category, total: 0, correct: 0, incorrect: 0, unattempted: 0 });
+      }
+      const c = cats.get(q.category);
+      c.total++; c[s]++;
+      total.total++; total[s]++;
+    }
+    const categories = [...cats.values()].sort((a, b) => a.category.localeCompare(b.category));
+    return { total, categories };
+  }
+
+  /**
+   * Questions for a new test: not attempted yet or answered incorrectly.
+   * If everything in the selection is already correct, the whole selection
+   * becomes available again (repeat = true).
+   */
+  const inSet = (set, v) => set === null || set.has(v);
+
+  /** scope = { cats, srcs }: each is null (everything) or a Set of selected values. */
+  function examPool(questions, progress, scope, includeAi = true, includeCorrect = false) {
+    const inScope = questions.filter((q) => inSet(scope.cats, q.category) && inSet(scope.srcs, q.source) && (includeAi || !q.aiGenerated) && inTj(scope.tj, q));
+    if (includeCorrect) return { pool: inScope, repeat: false };
+    const fresh = inScope.filter((q) => progress[q.id] !== 'correct');
+    if (fresh.length || !inScope.length) return { pool: fresh, repeat: false };
+    return { pool: inScope, repeat: true };
+  }
+
+  /** Random draw that rotates across categories so each is represented evenly. */
+  function balancedDraw(pool, n) {
+    const groups = new Map();
+    for (const q of shuffle(pool)) {
+      if (!groups.has(q.category)) groups.set(q.category, []);
+      groups.get(q.category).push(q);
+    }
+    let lists = [...groups.values()];
+    const picked = [];
+    while (picked.length < n && lists.length) {
+      lists = shuffle(lists);
+      for (const list of lists) {
+        if (picked.length >= n) break;
+        picked.push(list.pop());
+      }
+      lists = lists.filter((l) => l.length);
+    }
+    return shuffle(picked);
+  }
+
+  const toPlain = (q) => ({
+    id: q.id,
+    category: q.category,
+    source: q.source,
+    question: q.question,
+    options: [...q.options],
+    correctIndex: q.correctIndex,
+    explanation: q.explanation,
+    aiGenerated: q.aiGenerated,
+    ...(q.tj ? { tj: [...q.tj] } : {}),
+    ...(q.images && q.images.length ? { images: [...q.images] } : {}),
+    ...(q.explanationImages && q.explanationImages.length ? { explanationImages: [...q.explanationImages] } : {}),
+    ...(q.optionImages && q.optionImages.some(Boolean) ? { optionImages: [...q.optionImages] } : {}),
+  });
+
+  /* ======================================================================
+   * State (private to this closure) and state machine
+   * ==================================================================== */
+  const TRANSITIONS = Object.freeze({
+    INIT: ['LOADING', 'ERROR'],
+    LOADING: ['SETUP', 'ACTIVE', 'RESULTS', 'ERROR'],
+    SETUP: ['ACTIVE', 'ERROR'],
+    ACTIVE: ['RESULTS', 'SETUP', 'ERROR'],
+    RESULTS: ['SETUP', 'ERROR'],
+    ERROR: ['LOADING'],
+  });
+
+  /** UI-only state for the SETUP screen: panel = 'home' | 'browse' | 'manage'. */
+  function freshUi(panel = 'home') {
+    return { panel, notice: null, filter: { status: 'all', cats: null, srcs: null, tj: noTj(), query: '', reveal: false },
+      print: { status: 'all', cats: null, srcs: null, tj: noTj(), query: '', sel: new Set(), key: true, expl: true } };
+  }
+
+  const state = {
+    machine: 'INIT',
+    bank: [],
+    problems: [],
+    custom: [],
+    edits: Object.create(null), // { [id]: { correctIndex, explanation, aiGenerated } }
+    baseById: new Map(),        // questions as stored in bank.json / imports, before edits
+    questions: [],              // effective questions (base + edits)
+    byId: new Map(),
+    progress: Object.create(null),
+    session: null,
+    includeAi: true,
+    includeCorrect: false,
+    history: [],
+    key: null,                  // CryptoKey once logged in
+    env: null,                  // envelope of the loaded bank (salt, iterations)
+    scope: { cats: null, srcs: null, tj: noTj() }, // exam setup selection; null = everything
+    error: null,
+    tab: 'all',
+    ui: freshUi(),
+    user: null,                 // { id, name }
+    participants: null,         // number of participants, when the registry is configured
   };
 
-  /* ---- DOM helpers ---- */
-  function h(tag, a, ...kids) {
-    const el = document.createElement(tag);
-    for (const [k, v] of Object.entries(a || {})) {
-      if (v === null || v === undefined || v === false) continue;
-      if (k === 'class') el.className = v; else if (k === 'text') el.textContent = v;
-      else if (k === 'on') for (const [e, f] of Object.entries(v)) el.addEventListener(e, f);
-      else if (k === 'checked' || k === 'disabled' || k === 'value') el[k] = v; else el.setAttribute(k, v === true ? '' : v);
+  function transition(to) {
+    if (!TRANSITIONS[state.machine].includes(to)) {
+      throw new Error(`Illegal transition ${state.machine} -> ${to}`);
     }
-    const add = (x) => { if (x === null || x === undefined || x === false) return; if (Array.isArray(x)) x.forEach(add); else el.append(x instanceof Node ? x : document.createTextNode(String(x))); };
-    kids.forEach(add); return el;
+    state.machine = to;
   }
-  const mount = (...n) => { app.replaceChildren(...n.flat().filter(Boolean)); window.scrollTo(0, 0); panelSet(false); if (st.user && REGISTRY_URL) { renderBell(); prefetchReports(); kickRemote(); } };
-  /* ---- visitors (name + university, kept in a Google Sheet through an Apps Script web app; same idea as Quiz Time) ---- */
-  const REGISTRY_URL = String((window.OSCE_CONFIG && window.OSCE_CONFIG.registryUrl) || '');
-  const USER_KEY = 'osce.user.v1';
-  const UNIVERSITIES = ['IPB', 'UB', 'UGM', 'UNAIR', 'UNDANA', 'UNHAS', 'UNPAD', 'UNUD', 'USK', 'Other'];
+
+  function applyEdit(q) {
+    const e = state.edits[q.id];
+    if (!e || !Number.isInteger(e.correctIndex) || e.correctIndex < 0 || e.correctIndex >= q.options.length) return q;
+    return Object.freeze({
+      ...q,
+      correctIndex: e.correctIndex,
+      explanation: typeof e.explanation === 'string' ? e.explanation : q.explanation,
+      aiGenerated: e.aiGenerated === true,
+    });
+  }
+
+  function rebuildQuestions() {
+    const seen = new Set();
+    const base = [];
+    for (const q of [...state.bank, ...state.custom]) {
+      if (!seen.has(q.id)) { seen.add(q.id); base.push(q); }
+    }
+    const baseR = base.map(remoteOf);
+    state.baseById = new Map(baseR.map((q) => [q.id, q]));
+    state.questions = baseR.map(applyEdit);
+    state.byId = new Map(state.questions.map((q) => [q.id, q]));
+    // The bank changed (load or import): any category/source it adds must be selectable, so go back to "all".
+    state.scope = { cats: null, srcs: null, tj: noTj() };
+    if (state.ui && state.ui.filter) { state.ui.filter.cats = null; state.ui.filter.srcs = null; state.ui.filter.tj = noTj(); }
+  }
+
+  /** The questions of the current tab. Progress and history are per question, so the tabs simply look at different subsets. */
+  const scopeQs = () => (state.tab === 'focus' ? state.questions.filter((q) => isFocusSource(q.source)) : state.questions);
+  const tabHistory = () => state.history.map((e, i) => ({ e, i })).filter(({ e }) => state.tab !== 'focus' || e.tab === 'focus');
+
+  function setTab(tab) {
+    if (tab === state.tab) return;
+    state.tab = tab;
+    freshShown = {}; pinnedFresh = {};
+    if (tab !== 'reports' && tab !== 'admin') storage.write(KEYS.tab, tab);
+    state.scope = { cats: null, srcs: null, tj: noTj() };
+    state.ui = freshUi();
+    render();
+  }
+
+  function nextIdNumber() {
+    let max = 0;
+    for (const q of state.questions) {
+      const m = /^q(\d+)$/.exec(q.id);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    return max + 1;
+  }
+
+  /* ---- persistence ---- */
+  const saveProgress = () => storage.write(KEYS.progress, state.progress);
+  const saveCustom = () => storage.write(KEYS.custom, state.custom.map(toPlain));
+  const saveEdits = () => storage.write(KEYS.edits, state.edits);
+  function saveSession() {
+    if (state.session) storage.write(KEYS.session, state.session);
+    else storage.remove(KEYS.session);
+  }
+
+  const HISTORY_MAX = 200;
+  const saveHistory = () => storage.write(KEYS.history, state.history);
+  function loadHistory() {
+    const raw = storage.read(KEYS.history, []);
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const e of raw) {
+      if (!e || typeof e !== 'object' || !Array.isArray(e.ids) || !Array.isArray(e.a)) continue;
+      if (!Number.isFinite(e.t) || !e.ids.length || e.ids.length !== e.a.length) continue;
+      if (!e.ids.every((id) => typeof id === 'string') || !e.a.every((x) => Number.isInteger(x))) continue;
+      out.push({ t: e.t, ids: e.ids, a: e.a, tab: e.tab === 'focus' ? 'focus' : 'all' });
+    }
+    return out.slice(-HISTORY_MAX);
+  }
+
+  /* ---- participants (name + count, stored in a Google Sheet through an Apps Script web app) ---- */
   function loadUser() {
-    const r = store.read(USER_KEY, null);
-    return r && typeof r.id === 'string' && typeof r.name === 'string' && r.name.trim() && typeof r.university === 'string' && r.university.trim()
-      ? { id: r.id, name: r.name.trim().slice(0, 60), university: r.university.trim().slice(0, 80) } : null;
+    const raw = storage.read(KEYS.user, null);
+    if (!raw || typeof raw.id !== 'string' || typeof raw.name !== 'string' || !raw.name.trim()) return null;
+    return { id: raw.id, name: raw.name.trim().slice(0, 60), university: typeof raw.university === 'string' ? raw.university.trim().slice(0, 80) : '' };
   }
   function newDeviceId() {
     try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (_) { /* fall through */ }
     return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
   }
   const registry = {
-    async call(url, init) {
+    async call(init, query) {
       if (!REGISTRY_URL) return null;
-      const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 8000);
-      try { const res = await fetch(url, { ...init, signal: ctrl.signal, redirect: 'follow' }); const d = await res.json(); if (d && d.conflict) return { ok: false, conflict: true }; return d && d.ok ? d : null; }
-      catch (_) { return null; } finally { clearTimeout(timer); }
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const res = await fetch(query ? `${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}${query}` : REGISTRY_URL, { ...init, signal: ctrl.signal, redirect: 'follow' });
+        const data = await res.json();
+        if (data && data.conflict) return { ok: false, conflict: true };
+        return data && data.ok ? data : null;
+      } catch (_) { return null; } finally { clearTimeout(timer); }
     },
+    /** Upsert this participant (also counts a visit). Never blocks the app; failures are retried on the next start. */
     async sync() {
-      if (!st.user) return;
-      const d = await this.call(REGISTRY_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ app: 'osce', id: st.user.id, name: st.user.name, university: st.user.university }) });
-      if (d && Number.isInteger(d.count)) setVisitors(d.count);
+      if (!state.user) return;
+      const data = await this.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ id: state.user.id, name: state.user.name, university: state.user.university || '' }) });
+      if (data && Number.isInteger(data.count)) setParticipants(data.count);
+    },
+    async reports() {
+      const data = await this.call({ method: 'GET' }, `action=reports&device=${encodeURIComponent(state.user ? state.user.id : '')}`);
+      return data && Array.isArray(data.reports) ? data.reports : null;
     },
     async count() {
-      const d = await this.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}app=osce`, { method: 'GET' });
-      if (d && Number.isInteger(d.count)) setVisitors(d.count);
+      const data = await this.call({ method: 'GET' });
+      if (data && Number.isInteger(data.count)) setParticipants(data.count);
+      return data ? data.count : null;
     },
   };
-  const visitorsText = () => (st.visitors === null ? '' : `${st.visitors} participant${st.visitors === 1 ? ' has' : 's have'} used OSCE Practice.`);
-  function setVisitors(n) { st.visitors = n; const el = document.getElementById('visitors'); if (el) el.textContent = visitorsText(); }
-  function userStage(done, canCancel) {
-    const err = h('p', { class: 'notice err', role: 'alert', hidden: true });
-    const name = h('input', { id: 'user-name', type: 'text', maxlength: '60', autocomplete: 'name', value: st.user ? st.user.name : '' });
-    const uni = h('input', { id: 'user-uni', type: 'text', maxlength: '80', list: 'uni-list', autocomplete: 'organization', value: st.user ? st.user.university : '' });
-    mount(h('form', {
-      class: 'card', id: 'user-form', novalidate: true,
-      on: { submit: (e) => {
-        e.preventDefault();
-        const v = name.value.replace(/\s+/g, ' ').trim(), u = uni.value.replace(/\s+/g, ' ').trim();
-        if (v.length < 2) { err.hidden = false; err.textContent = 'Enter your name (at least 2 characters).'; name.focus(); return; }
-        if (u.length < 2) { err.hidden = false; err.textContent = 'Enter your university (at least 2 characters).'; uni.focus(); return; }
-        st.user = { id: st.user ? st.user.id : newDeviceId(), name: v.slice(0, 60), university: u.slice(0, 80) };
-        store.write(USER_KEY, st.user); registry.sync(); done();
-      } },
-    },
-      h('h2', { text: 'Who are you?' }),
-      h('p', { class: 'muted', text: 'Your name and university are recorded so the admin knows who has used OSCE Practice.' }),
-      h('label', { for: 'user-name', text: 'Name' }), name,
-      h('label', { for: 'user-uni', text: 'University' }), uni, h('datalist', { id: 'uni-list' }, UNIVERSITIES.map((u) => h('option', { value: u }))),
-      err,
-      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit', id: 'user-go', text: 'Continue' }), canCancel && h('button', { class: 'btn', type: 'button', id: 'user-cancel', text: 'Cancel', on: { click: home } })),
-      h('p', { class: 'muted', id: 'visitors', text: visitorsText() })));
-    registry.count(); name.focus();
+  function setParticipants(n) {
+    state.participants = n;
+    const el = document.getElementById('participants');
+    if (el) el.textContent = participantsText();
   }
-  const clock = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-  /** Bell sound (WebAudio, no files): n strikes, 0.9 s apart. The browser may need one tap on the page before it allows sound. */
-  let audioCtx = null;
-  function bell(n = 1) {
+  const participantsText = () => (state.participants === null ? '' : `${state.participants} participant${state.participants === 1 ? ' has' : 's have'} used Quiz Time.`);
+
+
+  /* ---- shared admin edits (stored ENCRYPTED in the sheet), admin flag and edit history ---- */
+  const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '' };
+  let adminFlag = false;
+  let editingOpen = false;
+  const isAdmin = () => adminFlag;
+  const RKEYS = 'quiz.rkeys.v1';
+  async function sealJson(obj) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, state.key, enc.encode(JSON.stringify(obj)));
+    return `e1:${b64e(iv)}.${b64e(new Uint8Array(ct))}`;
+  }
+  async function openJson(p) {
     try {
-      const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
-      audioCtx = audioCtx || new C(); if (audioCtx.state === 'suspended') audioCtx.resume();
-      for (let i = 0; i < n; i++) {
-        const t0 = audioCtx.currentTime + i * 0.9;
-        [[1, 1, 2.6], [2.76, 0.5, 4], [5.4, 0.25, 7], [8.9, 0.12, 10]].forEach(([r, a, k]) => {
-          const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-          o.type = 'sine'; o.frequency.value = 880 * r;
-          g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.22 * a, t0 + 0.005); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.2 + 1.4 / k * 1.5);
-          o.connect(g); g.connect(audioCtx.destination); o.start(t0); o.stop(t0 + 1.8);
-        });
-      }
-    } catch { /* sound is optional */ }
+      const [iv, ct] = String(p).slice(3).split('.');
+      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, state.key, b64d(ct));
+      return JSON.parse(new TextDecoder().decode(pt));
+    } catch (_) { return null; }
+  }
+  /** The question with the admin edit applied (ignored if it does not fit the question). */
+  function remoteOf(q) {
+    const e = remote.cur.get(q.id);
+    if (!e || typeof e.question !== 'string' || !e.question.trim() || !Array.isArray(e.options) || e.options.length !== q.options.length
+      || !e.options.every((o) => typeof o === 'string' && o.trim()) || !Number.isInteger(e.correctIndex) || e.correctIndex < 0 || e.correctIndex >= q.options.length) return q;
+    return Object.freeze({ ...q, question: e.question, options: e.options.slice(), correctIndex: e.correctIndex,
+      explanation: typeof e.explanation === 'string' ? e.explanation : q.explanation, aiGenerated: e.aiGenerated === true, remoteEdit: { rev: e.rev, by: e.by, t: e.t } });
+  }
+  /** One call: am I an admin, and every edit so far. `quiet`: the caller applies the result itself (start-up). */
+  async function loadRemote(force, quiet) {
+    if (!REGISTRY_URL || !state.user || !state.key) return false;
+    const data = await registry.call({ method: 'GET' }, `action=boot&device=${encodeURIComponent(state.user.id)}&app=quiz`);
+    if (!data) return false;
+    const rows = (Array.isArray(data.edits) ? data.edits : []).filter((r) => r && typeof r.item === 'string' && Number.isInteger(r.rev) && typeof r.p === 'string')
+      .sort((x, y) => (x.item < y.item ? -1 : x.item > y.item ? 1 : x.rev - y.rev));
+    const sig = `${data.admin ? 1 : 0}:${rows.length}:${rows.reduce((m, r) => Math.max(m, r.t || 0), 0)}`;
+    if (!force && sig === remote.sig) return true;
+    const bodies = await Promise.all(rows.map((r) => openJson(r.p)));
+    const cur = new Map(); const rev = new Map(); const hist = new Map();
+    rows.forEach((r, i) => {
+      const b = bodies[i];
+      rev.set(r.item, Math.max(rev.get(r.item) || 0, r.rev));
+      if (!hist.has(r.item)) hist.set(r.item, []);
+      hist.get(r.item).push({ rev: r.rev, by: r.by, t: r.t, kind: r.kind, note: b && b.note, before: b && b.before, set: b && b.set });
+      if (r.kind === 'revert') cur.delete(r.item);
+      else if (b && b.set) cur.set(r.item, { ...b.set, rev: r.rev, by: r.by, t: r.t });
+    });
+    const wasAdmin = adminFlag;
+    adminFlag = data.admin === true;
+    Object.assign(remote, { cur, rev, hist, sig });
+    if (!quiet) {
+      applyRemoteChange();
+      if (wasAdmin !== adminFlag && state.machine === 'SETUP' && !editingOpen) render();
+    }
+    return true;
+  }
+  function applyRemoteChange() {
+    if (!state.baseById) return;
+    const scope = state.scope; const f = state.ui && state.ui.filter;
+    const keep = f ? { cats: f.cats, srcs: f.srcs, tj: f.tj } : null;
+    rebuildQuestions();
+    if (scope) state.scope = scope;
+    if (keep) Object.assign(state.ui.filter, keep);
+    recomputeProgress();
+    pruneEdits();
+  }
+  /** A changed answer key changes what counts as correct: re-grade my last answer to each admin-edited question. */
+  function recomputeProgress() {
+    const prev = storage.read(RKEYS, []);
+    const ids = new Set([...(Array.isArray(prev) ? prev : []), ...remote.cur.keys()]);
+    if (!ids.size || !state.history) return;
+    const last = new Map();
+    for (const e of state.history) e.ids.forEach((id, i) => { if (ids.has(id)) last.set(id, e.a[i]); });
+    let changed = false;
+    for (const id of ids) {
+      const q = state.byId.get(id);
+      if (!q || !last.has(id)) continue;
+      const st = last.get(id) === q.correctIndex ? 'correct' : 'incorrect';
+      if (state.progress[id] !== st) { state.progress[id] = st; changed = true; }
+    }
+    if (changed) saveProgress();
+    storage.write(RKEYS, [...remote.cur.keys()]);
+  }
+  const adminPost = (body) => registry.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, device: state.user.id, editor: myLabel() }) });
+
+  /** Edit history of one question (visible to everyone). */
+  function editInfo(q) {
+    const hs = remote.hist.get(q.id);
+    if (!hs || !hs.length) return null;
+    const clip = (t) => { t = String(t == null ? '' : t); return t.length > 300 ? `${t.slice(0, 300)}…` : t; };
+    const change = (label, a, b) => h('p', { class: 'prewrap' }, h('strong', { text: `${label}: ` }), h('s', { class: 'muted', text: clip(a) }), ' → ', clip(b));
+    const lines = (e) => {
+      const b = e.before; const n = e.set; if (!b || !n) return [];
+      const out = [];
+      if (b.question !== n.question) out.push(change('Question', b.question, n.question));
+      (n.options || []).forEach((o, i) => { if (b.options && b.options[i] !== o) out.push(change(`Option ${letter(i)}`, b.options[i], o)); });
+      if (b.correctIndex !== n.correctIndex) out.push(change('Answer key', letter(b.correctIndex), letter(n.correctIndex)));
+      if ((b.explanation || '') !== (n.explanation || '')) out.push(change('Explanation', b.explanation, n.explanation));
+      return out;
+    };
+    return h('details', { class: 'edit-history' }, h('summary', { text: `✎ Edited by admin · history (${hs.length})` }),
+      h('ul', { class: 'hist-list' }, hs.slice().sort((x, y) => y.rev - x.rev).map((e) => h('li', { class: 'hist-item cm' },
+        h('div', {}, h('strong', { text: e.kind === 'revert' ? 'Reverted to the original version' : `Edit #${e.rev}` }), h('span', { class: 'muted', text: ` · ${e.by} · ${e.t ? new Date(e.t).toLocaleString() : ''}` })),
+        e.note && h('p', { class: 'muted', text: `Reason: ${e.note}` }), lines(e)))));
   }
 
-  /* ---- one clock per stage; deadline-based so it keeps running while a test result is open ---- */
-  const clk = { tick: null, end: 0, state: 'off', node: null, onDone: null, skipBtn: null };
-  function stopClock() { if (clk.tick) clearInterval(clk.tick); clk.tick = null; clk.state = 'off'; clk.node = null; clk.skipBtn = null; }
-  function paintClock() {
-    if (!clk.node) return;
-    if (clk.state === 'run') {
-      const left = Math.max(0, Math.ceil((clk.end - Date.now()) / 1000));
-      clk.node.textContent = clock(left); clk.node.classList.toggle('low', left <= 60);
-    } else if (clk.state === 'done') { clk.node.textContent = 'Time is up'; clk.node.classList.add('low'); }
-    else if (clk.state === 'skipped') { clk.node.textContent = 'Timer skipped'; clk.node.classList.remove('low'); }
-    if (clk.skipBtn) clk.skipBtn.hidden = clk.state !== 'run';
-  }
-  /** Pop-up reminder with bell strikes; disappears by itself after a few seconds. */
-  function reminder(msg, bells) {
-    const old = document.getElementById('reminder'); if (old) old.remove();
-    const n = h('div', { class: 'reminder', id: 'reminder', role: 'alert' }, h('strong', { text: msg }), h('button', { class: 'linkbtn', type: 'button', text: 'Close', on: { click: () => n.remove() } }));
-    document.body.append(n); bell(bells || 1); setTimeout(() => { if (n.isConnected) n.remove(); }, 8000);
-  }
-  /** onDone('done') when the time runs out (the app then moves on by itself); onDone('skipped') for Skip timer. `marks` = reminders by seconds left. */
-  function startClock(secs, onDone, marks, bells) {
-    stopClock(); clk.bells = bells; clk.state = 'run'; clk.end = Date.now() + secs * 1000; clk.onDone = onDone;
-    const todo = (marks || []).filter((m) => m.left < secs);
-    clk.tick = setInterval(() => {
-      if (clk.state === 'run') {
-        const left = Math.ceil((clk.end - Date.now()) / 1000);
-        while (todo.length && left <= todo[0].left) { const m = todo.shift(); reminder(m.msg, m.bells); }
-        if (Date.now() >= clk.end) { clk.state = 'done'; const f = clk.onDone; stopClockKeepNode(); bell(clk.bells || 4); f('done'); return; }
+  /** Admin editor for one question: question, options, key, explanation. Saved for everyone. */
+  function adminEditor(q, done) {
+    editingOpen = true;
+    const close = (changed) => { editingOpen = false; done(changed); };
+    const area = (id, v, rows) => { const t = h('textarea', { id, rows: String(rows), maxlength: '4000' }); t.value = v; return t; };
+    const qEl = area('ae-q', q.question, 5);
+    const opts = q.options.map((t, i) => { const el = h('input', { type: 'text', id: `ae-o${i}`, maxlength: '600' }); el.value = t; return el; });
+    const sel = h('select', { id: 'ae-correct' }, q.options.map((_, i) => h('option', { value: String(i), text: letter(i) })));
+    sel.value = String(q.correctIndex);
+    const ex = area('ae-expl', q.explanation || '', 5);
+    const ai = h('input', { id: 'ae-ai', type: 'checkbox', checked: q.aiGenerated });
+    const note = h('input', { type: 'text', id: 'ae-note', maxlength: '200', placeholder: 'Reason (optional, shown in the edit history)' });
+    const msg = h('p', { class: 'notice', role: 'alert', hidden: true });
+    const show = (t, cls = 'err') => { msg.hidden = false; msg.className = `notice ${cls}`; msg.textContent = t; };
+    const mk = (id, text, cls, fn) => h('button', { class: `btn ${cls}`, type: 'button', id, text, on: { click: fn } });
+    const send = async (kind) => {
+      const before = { question: q.question, options: q.options.slice(), correctIndex: q.correctIndex, explanation: q.explanation || '', aiGenerated: q.aiGenerated === true };
+      let set = null;
+      if (kind === 'edit') {
+        set = { question: qEl.value.trim(), options: opts.map((o) => o.value.trim()), correctIndex: Number(sel.value), explanation: ex.value.trim(), aiGenerated: ai.checked };
+        if (!set.question || set.options.some((o) => !o)) { show('The question and every option need text.'); return; }
+        if (JSON.stringify(set) === JSON.stringify(before)) { show('Nothing changed.'); return; }
       }
-      paintClock();
-    }, 250);
-  }
-  /** Time is up: stop ticking but keep the node so it reads “Time is up” until the next stage replaces it. */
-  function stopClockKeepNode() { if (clk.tick) clearInterval(clk.tick); clk.tick = null; paintClock(); }
-  function skipClock() { if (clk.state !== 'run') return; clk.state = 'skipped'; clk.onDone('skipped'); paintClock(); }
-  function timerBlock() {
-    const node = h('div', { class: 'timer', id: 'timer' });
-    const skip = h('button', { class: 'btn', id: 'skip', text: 'Skip timer', on: { click: skipClock } });
-    clk.node = node; clk.skipBtn = skip; paintClock();
-    return h('div', {}, node, h('div', { class: 'row center' }, skip));
+      saveBtn.disabled = true; if (revBtn) revBtn.disabled = true;
+      const p = await sealJson({ kind, set, before, note: note.value.trim() });
+      const res = await adminPost({ action: 'aedit', app: 'quiz', item: q.id, kind, rev: remote.rev.get(q.id) || 0, p });
+      saveBtn.disabled = false; if (revBtn) revBtn.disabled = false;
+      if (!res) { show('Could not save. Check your connection and that the sheet script is updated and redeployed.'); return; }
+      if (res.conflict) { await loadRemote(true); show('Another admin edited this question in the meantime. The latest version is loaded: close and open the editor again.'); return; }
+      await loadRemote(true);
+      close(true);
+    };
+    const saveBtn = mk('ae-save', 'Save for everyone', 'primary', () => send('edit'));
+    const revBtn = remote.cur.has(q.id) ? mk('ae-revert', 'Revert to original', 'danger', () => { if (window.confirm('Revert this question to the original version for everyone?')) send('revert'); }) : null;
+    return h('div', { class: 'editor admin-editor', id: 'admin-editor' },
+      h('h3', { text: `Edit ${q.id} (saved for everyone)` }),
+      h('label', { for: 'ae-q', text: 'Question' }), qEl,
+      opts.map((el, i) => h('div', {}, h('label', { for: `ae-o${i}`, text: `Option ${letter(i)}` }), el)),
+      h('label', { for: 'ae-correct', text: 'Correct answer' }), sel,
+      h('label', { for: 'ae-expl', text: 'Explanation' }), ex,
+      h('label', { class: 'inline-check' }, ai, 'Still AI-generated (untick once verified)'),
+      h('label', { for: 'ae-note', text: 'Reason' }), note,
+      msg,
+      h('div', { class: 'row form-actions' }, saveBtn, mk('ae-cancel', 'Cancel', '', () => close(false)), revBtn));
   }
 
-  const cur = () => st.byId.get(st.caseId);
-  const stageTotal = () => (st.assessOn ? 4 : 3);
-  const stage = (n, label) => h('p', { class: 'stage', text: `Stage ${n} of ${stageTotal()} · ${label}` });
-  const lines = (arr) => h('ul', {}, (arr || []).map((x) => h('li', { text: x })));
+  function loadProgress() {
+    const raw = storage.read(KEYS.progress, {});
+    const out = Object.create(null);
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const [id, v] of Object.entries(raw)) {
+        if (v === 'correct' || v === 'incorrect') out[id] = v;
+      }
+    }
+    return out;
+  }
+
+  function loadCustom() {
+    const raw = storage.read(KEYS.custom, []);
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+      const r = normalizeQuestion(item);
+      if (r.value && !seen.has(r.value.id)) { seen.add(r.value.id); out.push(r.value); }
+    }
+    return out;
+  }
+
+  function loadEdits() {
+    const raw = storage.read(KEYS.edits, {});
+    const out = Object.create(null);
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const [id, e] of Object.entries(raw)) {
+        if (e && Number.isInteger(e.correctIndex) && typeof e.explanation === 'string') {
+          out[id] = { correctIndex: e.correctIndex, explanation: e.explanation, aiGenerated: e.aiGenerated === true };
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Drops edits whose question is gone or that now match the committed bank.json. */
+  function pruneEdits() {
+    let changed = false;
+    for (const [id, e] of Object.entries(state.edits)) {
+      const base = state.baseById.get(id);
+      const same = base && e.correctIndex === base.correctIndex
+        && e.explanation === base.explanation && e.aiGenerated === base.aiGenerated;
+      if (!base || same) { delete state.edits[id]; changed = true; }
+    }
+    if (changed) saveEdits();
+  }
+
+  function loadSession() {
+    const raw = storage.read(KEYS.session, null);
+    if (!raw || !Array.isArray(raw.ids)) return null;
+    const ids = [...new Set(raw.ids.filter((id) => typeof id === 'string' && state.byId.has(id)))];
+    if (!ids.length) return null;
+    const answers = Object.create(null);
+    const rawAnswers = raw.answers && typeof raw.answers === 'object' ? raw.answers : {};
+    for (const id of ids) {
+      const c = rawAnswers[id];
+      if (Number.isInteger(c) && c >= 0 && c < state.byId.get(id).options.length) answers[id] = c;
+    }
+    let index = Number.isInteger(raw.index) ? raw.index : 0;
+    const legacyFinished = raw.submitted === undefined && index >= ids.length;
+    index = Math.max(0, Math.min(index, ids.length - 1));
+    const marked = Object.create(null);
+    const rawMarked = raw.marked && typeof raw.marked === 'object' ? raw.marked : {};
+    for (const id of ids) if (rawMarked[id] === true) marked[id] = true;
+    const limit = Number.isFinite(raw.limit) && raw.limit > 0 && raw.limit <= 600 ? raw.limit : 0;
+    const endAt = limit && Number.isFinite(raw.endAt) ? raw.endAt : 0;
+    return { ids, index, answers, marked, submitted: raw.submitted === true || legacyFinished, limit, endAt };
+  }
+
+  /* ---- loading ---- */
+  async function fetchEnvelope() {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS * 3);
+    try {
+      const res = await fetch(BANK_URL, { cache: 'no-cache', signal: ctrl.signal });
+      if (!res.ok) throw new DataError(`Could not load ${BANK_URL} (HTTP ${res.status}).`);
+      let env;
+      try { env = await res.json(); }
+      catch (_) { throw new DataError(`${BANK_URL} is not valid.`); }
+      if (!env || !env.salt || !env.iv || !env.ct || !Number.isInteger(env.iter)) throw new DataError(`${BANK_URL} is not valid.`);
+      return env;
+    } catch (err) {
+      if (err instanceof DataError) throw err;
+      if (err && err.name === 'AbortError') throw new DataError('Loading timed out. Check your connection and retry.');
+      throw new DataError('Network error while loading questions. Check your connection and retry.');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function fetchBank() {
+    if (!state.key) throw new AuthError('not logged in');
+    const env = await fetchEnvelope();
+    const data = await decryptBank(env, state.key);
+    state.env = env;
+    return data;
+  }
+
+  async function boot() {
+    transition('LOADING');
+    render();
+    try {
+      const { valid, problems } = parseBank(await fetchBank());
+      state.bank = valid;
+      state.problems = problems;
+
+      // Local imports that are now part of the committed bank are dropped.
+      const bankIds = new Set(valid.map((q) => q.id));
+      const custom = loadCustom();
+      state.custom = custom.filter((q) => !bankIds.has(q.id));
+      if (state.custom.length !== custom.length) saveCustom();
+
+      if (state.user) {
+        const pr = loadRemote(false, true);
+        const first = await Promise.race([pr, new Promise((res) => setTimeout(() => res(null), 3500))]);
+        if (first === null) pr.then(() => { applyRemoteChange(); if (state.machine === 'SETUP' && !editingOpen) render(); }).catch(() => {});
+      }
+      state.edits = loadEdits();
+      rebuildQuestions();
+      pruneEdits();
+      state.progress = loadProgress();
+      state.session = loadSession();
+      registry.sync();
+      setTimeout(() => prefetchReports(), 1500);
+      state.history = loadHistory();
+      recomputeProgress();
+      state.tab = storage.read(KEYS.tab, 'all') === 'focus' ? 'focus' : 'all';
+      state.ui = freshUi();
+
+      if (!state.session) transition('SETUP');
+      else transition(state.session.submitted ? 'RESULTS' : 'ACTIVE');
+    } catch (err) {
+      if (err instanceof AuthError) { showLogin(); return; }
+      state.error = err instanceof DataError ? err.message : 'Unexpected error while starting the app.';
+      if (!(err instanceof DataError)) console.error(err);
+      transition('ERROR');
+    }
+    render();
+  }
+
+  /* ---- actions ---- */
+  function startTest(scope, count, includeAi, includeCorrect, limit = 0) {
+    resetReport();
+    const { pool } = examPool(scopeQs(), state.progress, scope, includeAi, includeCorrect);
+    if (!pool.length) return;
+    const n = Math.max(1, Math.min(count, pool.length));
+    const ids = balancedDraw(pool, n).map((q) => q.id);
+    state.session = { ids, index: 0, answers: Object.create(null), marked: Object.create(null), submitted: false, limit, endAt: limit ? Date.now() + limit * 60000 : 0 };
+    saveSession();
+    transition('ACTIVE');
+    render();
+  }
+
+  /** Start an exam from a fixed list of question ids (retake). Returns how many ids were skipped. */
+  function startFromIds(rawIds) {
+    resetReport();
+    const ids = rawIds.filter((id) => state.byId.has(id));
+    if (!ids.length) return -1;
+    state.session = { ids, index: 0, answers: Object.create(null), marked: Object.create(null), submitted: false };
+    saveSession();
+    transition('ACTIVE');
+    render();
+    return rawIds.length - ids.length;
+  }
+
+  function currentQuestion() {
+    return state.byId.get(state.session.ids[state.session.index]);
+  }
+
+  /* Exam mode: choices are drafts until the exam is submitted. */
+  function selectOption(i) {
+    const q = currentQuestion();
+    state.session.answers[q.id] = i;
+    saveSession();
+    render(`button.option[data-i="${i}"]`);
+  }
+
+  function clearAnswer() {
+    delete state.session.answers[currentQuestion().id];
+    saveSession();
+    render('#mark-btn');
+  }
+
+  function toggleMark() {
+    const id = currentQuestion().id;
+    const marked = state.session.marked;
+    if (marked[id]) delete marked[id]; else marked[id] = true;
+    saveSession();
+    render('#mark-btn');
+  }
+
+  function goTo(i) {
+    const s = state.session;
+    s.index = Math.max(0, Math.min(i, s.ids.length - 1));
+    saveSession();
+    render();
+  }
+
+  /** Grades the exam. Only answered questions change status; unanswered ones keep theirs. */
+  function submitExam() {
+    resetReport();
+    stopTicker();
+    const s = state.session;
+    for (const id of s.ids) {
+      const choice = s.answers[id];
+      if (choice === undefined) continue;
+      state.progress[id] = choice === state.byId.get(id).correctIndex ? 'correct' : 'incorrect';
+    }
+    s.submitted = true;
+    const answered = s.ids.filter((id) => s.answers[id] !== undefined);
+    if (answered.length) {
+      state.history.push({ t: Date.now(), ids: answered, a: answered.map((id) => s.answers[id]), tab: state.tab });
+      if (state.history.length > HISTORY_MAX) state.history = state.history.slice(-HISTORY_MAX);
+      saveHistory();
+    }
+    saveProgress();
+    saveSession();
+    transition('RESULTS');
+    render();
+  }
+
+  function leaveTest() {
+    resetReport();
+    stopTicker();
+    state.session = null;
+    saveSession();
+    state.ui = freshUi();
+    transition('SETUP');
+    render();
+  }
+
+  function retakeFromResults() {
+    const ids = state.session.ids.slice();
+    state.session = null;
+    state.ui = freshUi();
+    transition('SETUP');
+    startFromIds(ids);
+  }
+
+  function resetProgress() {
+    state.progress = Object.create(null);
+    saveProgress();
+    render();
+  }
+
+  /* ---- progress backup (export / import) ---- */
+  const PROGRESS_FORMAT = 'quiz-trainer-progress';
+
+  function exportProgress() {
+    const data = {
+      app: PROGRESS_FORMAT,
+      v: 1,
+      exportedAt: new Date().toISOString(),
+      progress: state.progress,
+      edits: state.edits,
+      custom: state.custom.map(toPlain),
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }));
+    const a = h('a', { href: url, download: `progress-${new Date().toISOString().slice(0, 10)}.json` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /** Restores a progress backup. Merge keeps current progress and lets the file win on conflicts. */
+  function importProgress(text, replace) {
+    let data;
+    try { data = JSON.parse(text); } catch (_) { return { ok: false, message: 'That file is not valid JSON.' }; }
+    if (!data || data.app !== PROGRESS_FORMAT || !data.progress || typeof data.progress !== 'object' || Array.isArray(data.progress)) {
+      return { ok: false, message: 'That is not a progress backup made by this app.' };
+    }
+    const progress = replace ? Object.create(null) : Object.assign(Object.create(null), state.progress);
+    let restored = 0;
+    let skipped = 0;
+
+    // Questions that were imported locally on the other device come first so their progress can attach.
+    if (Array.isArray(data.custom)) {
+      const toAdd = [];
+      for (const raw of data.custom) {
+        const r = normalizeQuestion(raw);
+        if (r.value && !state.byId.has(r.value.id) && !toAdd.some((q) => q.id === r.value.id)) toAdd.push(r.value);
+      }
+      if (toAdd.length) addCustom(toAdd);
+    }
+    for (const [id, v] of Object.entries(data.progress)) {
+      if ((v === 'correct' || v === 'incorrect') && state.byId.has(id)) { progress[id] = v; restored++; } else skipped++;
+    }
+    if (data.edits && typeof data.edits === 'object' && !Array.isArray(data.edits)) {
+      if (replace) state.edits = Object.create(null);
+      for (const [id, e] of Object.entries(data.edits)) {
+        const base = state.baseById.get(id);
+        if (base && e && Number.isInteger(e.correctIndex) && e.correctIndex >= 0 && e.correctIndex < base.options.length && typeof e.explanation === 'string') {
+          state.edits[id] = { correctIndex: e.correctIndex, explanation: e.explanation, aiGenerated: e.aiGenerated === true };
+        }
+      }
+      rebuildQuestions();
+      pruneEdits();
+      saveEdits();
+    }
+    state.progress = progress;
+    saveProgress();
+    return {
+      ok: true,
+      message: `Restored progress for ${restored} question(s)${skipped ? `; ${skipped} entr${skipped === 1 ? 'y' : 'ies'} skipped (question no longer in the bank)` : ''}.`
+        + (storage.available ? '' : ' Warning: browser storage is unavailable, so this will be lost on refresh.'),
+    };
+  }
+
+  /* ---- report a question (sent to the Google Sheet through the same Apps Script) ---- */
+  const REPORT_TYPES = ['Incorrect question', 'Incorrect answer choices', 'Incorrect answer key', 'Incorrect explanation', 'Incorrect category', 'Other'];
+  const reportDraft = { id: null, open: false, types: new Set(), comment: '', sending: false, msg: null };
+  const reportedIds = new Set(); // questions reported during this visit
+  function resetReport() { reportDraft.id = null; reportDraft.open = false; reportDraft.types.clear(); reportDraft.comment = ''; reportDraft.sending = false; reportDraft.msg = null; }
+  function toggleReport() {
+    const q = currentQuestion();
+    if (reportDraft.id !== q.id) { resetReport(); reportDraft.id = q.id; }
+    reportDraft.open = !reportDraft.open;
+    render(reportDraft.open ? '#report-box input' : '#report-btn');
+  }
+  async function sendReport() {
+    const q = currentQuestion();
+    const d = reportDraft;
+    const fail = (text) => { d.msg = { type: 'err', text }; render('#report-send'); };
+    if (d.sending) return;
+    if (!d.types.size) return fail('Select at least one type of error.');
+    if (d.types.size === 1 && d.types.has('Other') && !d.comment.trim()) return fail('Please describe the problem in the comment box.');
+    if (!REGISTRY_URL) return fail('Reporting is not available: this site is not connected to the report sheet.');
+    d.sending = true; d.msg = { type: 'ok', text: 'Sending…' }; render('#report-send');
+    const res = await postReport(q, d.types, d.comment);
+    d.sending = false;
+    if (res) { reportedIds.add(q.id); resetReport(); render('#report-btn'); } else fail('Could not send the report. Check your connection and try again.');
+  }
+  function postReport(q, types, comment) {
+    const reporter = state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : 'Unknown';
+    return registry.call({
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'report', reporter, code: q.id, types: [...types], category: q.category,
+        question: q.question, choices: q.options.map((t, i) => `${letter(i)}. ${t}`).join('\n'),
+        device: state.user ? state.user.id : '', answerKey: `${letter(q.correctIndex)}. ${q.options[q.correctIndex]}`, explanation: q.explanation || '', comment: comment.trim().slice(0, 1000),
+      }),
+    });
+  }
+  /** Self-contained Report button + panel for one question (used in Browse and in the results review). Does not re-render the page. */
+  function reportControl(q) {
+    const wrap = h('div', { class: 'item-report' });
+    const types = new Set(); let comment = ''; let open = false; let sending = false; let msg = null;
+    const paintR = (focus) => {
+      const btn = h('button', { class: 'btn', type: 'button', 'data-report': q.id, 'aria-expanded': open ? 'true' : 'false', text: reportedIds.has(q.id) ? 'Reported ✓' : 'Report',
+        on: { click: () => { open = !open; msg = null; paintR(open ? 'input' : 'button'); } } });
+      const kids = [h('div', { class: 'row item-actions' }, btn)];
+      if (reportedIds.has(q.id) && !open) kids.push(h('p', { class: 'muted', text: 'Thanks, your report was sent.' }));
+      if (open) {
+        kids.push(h('div', { class: 'report-box' },
+          h('h3', { text: 'Report this question' }),
+          h('p', { class: 'muted', text: 'What looks wrong? Select everything that applies.' }),
+          REPORT_TYPES.map((t) => h('label', { class: 'inline-check' },
+            h('input', { type: 'checkbox', 'data-type': t, checked: types.has(t), on: { change: (e) => { if (e.target.checked) types.add(t); else types.delete(t); } } }), t)),
+          h('label', { text: 'Additional comments (optional)' }),
+          h('textarea', { maxlength: '1000', placeholder: 'For example: the answer key should be C because…', value: comment, on: { input: (e) => { comment = e.target.value; } } }),
+          msg && h('div', { class: `notice ${msg.type}`, role: 'alert' }, h('p', { text: msg.text })),
+          h('div', { class: 'row' },
+            h('button', { class: 'btn primary', type: 'button', 'data-send': q.id, text: sending ? 'Sending…' : 'Send report', disabled: sending,
+              on: { click: async () => {
+                if (sending) return;
+                const fail = (text) => { msg = { type: 'err', text }; paintR('send'); };
+                if (!types.size) return fail('Select at least one type of error.');
+                if (types.size === 1 && types.has('Other') && !comment.trim()) return fail('Please describe the problem in the comment box.');
+                if (!REGISTRY_URL) return fail('Reporting is not available: this site is not connected to the report sheet.');
+                sending = true; msg = { type: 'ok', text: 'Sending…' }; paintR('send');
+                const res = await postReport(q, types, comment);
+                sending = false;
+                if (res) { reportedIds.add(q.id); types.clear(); comment = ''; open = false; msg = null; paintR('button'); } else fail('Could not send the report. Check your connection and try again.');
+              } } }),
+            h('button', { class: 'btn', type: 'button', text: 'Cancel', on: { click: () => { open = false; msg = null; paintR('button'); } } }))));
+      }
+      wrap.replaceChildren(...kids);
+      const el = focus === 'input' ? wrap.querySelector('input') : focus === 'send' ? wrap.querySelector('[data-send]') : focus === 'button' ? wrap.querySelector('[data-report]') : null;
+      if (el) el.focus();
+    };
+    paintR();
+    return wrap;
+  }
+  function reportPanel(q) {
+    const d = reportDraft;
+    return h('div', { class: 'report-box', id: 'report-box' },
+      h('h3', { text: 'Report this question' }),
+      h('p', { class: 'muted', text: 'What looks wrong? Select everything that applies.' }),
+      REPORT_TYPES.map((t) => h('label', { class: 'inline-check' },
+        h('input', { type: 'checkbox', 'data-type': t, checked: d.types.has(t), on: { change: (e) => { if (e.target.checked) d.types.add(t); else d.types.delete(t); } } }), t)),
+      h('label', { for: 'report-comment', text: 'Additional comments (optional)' }),
+      h('textarea', { id: 'report-comment', maxlength: '1000', placeholder: 'For example: the answer key should be C because…', value: d.comment, on: { input: (e) => { d.comment = e.target.value; } } }),
+      d.msg && h('div', { class: `notice ${d.msg.type}`, role: 'alert' }, h('p', { text: d.msg.text })),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'button', id: 'report-send', text: d.sending ? 'Sending…' : 'Send report', disabled: d.sending, on: { click: sendReport } }),
+        h('button', { class: 'btn', type: 'button', id: 'report-cancel', text: 'Cancel', on: { click: toggleReport } })));
+  }
+
+  /* ---- answer-key edits ---- */
+  function finishEdit(id, prev) {
+    saveEdits();
+    rebuildQuestions();
+    const changedKey = state.byId.get(id).correctIndex !== prev.correctIndex;
+    // A stored status was graded against the old key, so it can no longer be trusted.
+    if (changedKey && state.progress[id]) { delete state.progress[id]; saveProgress(); }
+    return { changedKey };
+  }
+
+  function saveEdit(id, edit) {
+    const base = state.baseById.get(id);
+    const prev = state.byId.get(id);
+    if (!base || !prev || !Number.isInteger(edit.correctIndex)
+        || edit.correctIndex < 0 || edit.correctIndex >= base.options.length) return { changedKey: false };
+    const next = { correctIndex: edit.correctIndex, explanation: edit.explanation, aiGenerated: edit.aiGenerated };
+    if (next.correctIndex === base.correctIndex && next.explanation === base.explanation && next.aiGenerated === base.aiGenerated) {
+      delete state.edits[id];
+    } else {
+      state.edits[id] = next;
+    }
+    return finishEdit(id, prev);
+  }
+
+  function revertEdit(id) {
+    const prev = state.byId.get(id);
+    if (!prev) return { changedKey: false };
+    delete state.edits[id];
+    return finishEdit(id, prev);
+  }
+
+  /* ---- question import / export ---- */
+  function addCustom(list) {
+    state.custom.push(...list);
+    const saved = saveCustom();
+    rebuildQuestions();
+    return saved;
+  }
+
+  function importQuestions(text, reassign) {
+    let data;
+    try { data = JSON.parse(text); }
+    catch (_) { return { ok: false, message: 'Nothing imported: that is not valid JSON.' }; }
+    if (!Array.isArray(data) || !data.length) {
+      return { ok: false, message: 'Nothing imported: expected a non-empty JSON array.' };
+    }
+
+    const existing = new Set(state.questions.map((q) => q.id));
+    const seen = new Set();
+    const problems = [];
+    const items = [];
+
+    data.forEach((raw, i) => {
+      const candidate = reassign && raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw, id: 'tmp' } : raw;
+      const r = normalizeQuestion(candidate);
+      const label = `Item ${i + 1}`;
+      if (r.error) problems.push(`${label}: ${r.error}`);
+      else if (!reassign && (existing.has(r.value.id) || seen.has(r.value.id))) {
+        problems.push(`${label}: id "${r.value.id}" already exists`);
+      } else {
+        seen.add(r.value.id);
+        items.push(r.value);
+      }
+    });
+
+    if (problems.length) {
+      const shown = problems.slice(0, 15);
+      if (problems.length > shown.length) shown.push(`...and ${problems.length - shown.length} more`);
+      return { ok: false, message: `Nothing imported: ${problems.length} problem(s) found.`, details: shown };
+    }
+
+    let toAdd = items;
+    if (reassign) {
+      let n = nextIdNumber();
+      toAdd = items.map((q) => Object.freeze({ ...q, id: `q${n++}` }));
+    }
+    const saved = addCustom(toAdd);
+    return {
+      ok: true,
+      message: `Imported ${toAdd.length} question(s) as ${toAdd[0].id}${toAdd.length > 1 ? ` to ${toAdd[toAdd.length - 1].id}` : ''}.`
+        + (saved ? '' : ' Warning: browser storage is unavailable, so they will be lost on refresh.'),
+    };
+  }
+
+  async function exportBank() {
+    if (!state.key || !state.env) return;
+    const env = await encryptBank(state.env, state.key, state.questions.map(toPlain));
+    const url = URL.createObjectURL(new Blob([JSON.stringify(env)], { type: 'application/json' }));
+    const a = h('a', { href: url, download: 'bank.enc' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /* ======================================================================
+   * DOM helpers
+   * ==================================================================== */
+  const app = document.getElementById('app');
+  if (!app) throw new Error('Missing #app container');
+
+  /** Error boundary for event handlers. */
+  const guard = (fn) => (...args) => {
+    try { fn(...args); } catch (err) { console.error(err); renderFatal(); }
+  };
+
+  /** Tiny element factory. Event handlers go through `on: { click: fn }`. */
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === null || v === undefined || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = v;
+      else if (k === 'on') for (const [evt, fn] of Object.entries(v)) el.addEventListener(evt, guard(fn));
+      else if (k === 'value' || k === 'checked' || k === 'disabled') el[k] = v;
+      else el.setAttribute(k, v === true ? '' : String(v));
+    }
+    const add = (kid) => {
+      if (kid === null || kid === undefined || kid === false) return;
+      if (Array.isArray(kid)) kid.forEach(add);
+      else el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+    };
+    kids.forEach(add);
+    return el;
+  }
+
+  const mount = (nodes) => app.replaceChildren(...nodes.filter(Boolean));
+
+  const refs = { notice: null };
+
+  function noticeNode(n) {
+    if (!n) return null;
+    return h('div', { class: `notice ${n.type}`, role: n.type === 'err' ? 'alert' : 'status' },
+      h('p', { text: n.text }),
+      n.details && h('ul', {}, n.details.map((d) => h('li', { text: d })))
+    );
+  }
+
+  function paintNotice(type, text, details) {
+    state.ui.notice = { type, text, details };
+    if (refs.notice) refs.notice.replaceChildren(...[noticeNode(state.ui.notice)].filter(Boolean));
+  }
+
+  /* ======================================================================
+   * Shared view pieces
+   * ==================================================================== */
+  /** Click an image to see it large; click again (or press Escape) to close. */
+  function zoomImage(src, alt) {
+    const box = h('div', { class: 'lightbox', role: 'dialog', 'aria-label': 'Image preview' }, h('img', { src, alt }));
+    const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    box.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.append(box);
+  }
+  function imageNodes(list, what, cls = 'q-images') {
+    if (!list || !list.length) return null;
+    return h('div', { class: cls }, list.map((src, i) => h('img', {
+      class: 'q-img', src, alt: `${what} ${i + 1}`, loading: 'lazy', tabindex: '0',
+      on: { click: () => zoomImage(src, `${what} ${i + 1}`), keydown: (e) => { if (e.key === 'Enter') zoomImage(src, `${what} ${i + 1}`); } },
+    })));
+  }
+  const stemNodes = (q) => [h('p', { class: 'question-text', text: q.question }), imageNodes(q.images, 'Question image')];
+  const optionImage = (q, i) => (q.optionImages && q.optionImages[i] ? imageNodes([q.optionImages[i]], `Option ${letter(i)} image`, 'opt-images') : null);
+
+  function explanationNode(q, open = false) {
+    return h('div', { class: 'expl-wrap' }, explanationDetails(q, open), editInfo(q));
+  }
+  function explanationDetails(q, open) {
+    return h('details', { class: 'explanation', open: open && Boolean(q.explanation || (q.explanationImages && q.explanationImages.length)) },
+      h('summary', { text: 'Show explanation' }),
+      q.explanation
+        ? h('p', { text: q.explanation })
+        : ((q.explanationImages && q.explanationImages.length) ? null : h('p', { class: 'muted', text: 'No explanation provided for this question.' })),
+      imageNodes(q.explanationImages, 'Explanation image')
+    );
+  }
+
+  function aiNote(q) {
+    return q.aiGenerated
+      ? h('p', { class: 'ai-note', text: 'AI-generated answer and explanation. Verify before relying on it.' })
+      : null;
+  }
+
+  /** Read-only option list. Marks the correct option and, if given, the user's wrong pick. */
+  function staticOptions(q, chosen, reveal = true) {
+    return h('ul', { class: 'options' }, q.options.map((text, i) => {
+      let cls = 'option static';
+      let mark = null;
+      if (!reveal) { if (i === chosen) { cls += ' chosen'; mark = '●'; } }
+      else if (i === q.correctIndex) { cls += ' correct'; mark = '✓'; }
+      else if (i === chosen) { cls += ' wrong'; mark = '✗'; }
+      return h('li', {}, h('div', { class: cls },
+        h('span', { class: 'letter', text: letter(i) }),
+        h('span', {}, h('span', { text }), optionImage(q, i)),
+        mark && h('span', { class: 'mark', 'aria-hidden': 'true', text: mark })
+      ));
+    }));
+  }
+
+  const statusBadge = (s) => h('span', { class: `badge status-${s}`, text: STATUS_LABEL[s] });
+
+  function stackedBar(t) {
+    const bar = h('div', {
+      class: 'bar', role: 'img',
+      'aria-label': `${t.correct} correct, ${t.incorrect} incorrect, ${t.unattempted} not attempted`,
+    });
+    for (const [cls, n] of [['correct', t.correct], ['incorrect', t.incorrect]]) {
+      const seg = h('span', { class: `seg ${cls}` });
+      seg.style.width = `${t.total ? (n / t.total) * 100 : 0}%`;
+      bar.append(seg);
+    }
+    return bar;
+  }
+
+  function backButton() {
+    return h('div', { class: 'row' },
+      h('button', {
+        class: 'btn', type: 'button', id: 'back', text: '← Back',
+        on: { click: () => { state.ui = freshUi(); refs.notice = null; render(); } },
+      }));
+  }
+
+  /* ======================================================================
+   * Views (state -> DOM). They read state, never mutate it directly.
+   * ==================================================================== */
+  function viewLoading() {
+    return [h('p', { class: 'status' }, 'Loading questions…')];
+  }
+
+  function viewError() {
+    return [h('section', { class: 'card' },
+      h('h2', { text: 'Could not start' }),
+      h('p', { text: state.error || 'Something went wrong.' }),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'button', id: 'retry', text: 'Retry', on: { click: boot } })
+      )
+    )];
+  }
+
+  function legend(t) {
+    const item = (cls, label, n) => h('li', {}, h('span', { class: `dot ${cls}` }), `${label}: ${n}`);
+    return h('ul', { class: 'legend' },
+      item('correct', 'Correct', t.correct),
+      item('incorrect', 'Incorrect', t.incorrect),
+      item('', 'Not attempted', t.unattempted)
+    );
+  }
+
+  function categoryTable(categories) {
+    const th = (text, num) => h('th', { class: num ? 'num' : '', text });
+    return h('section', { class: 'card' },
+      h('h2', { text: 'By category' }),
+      h('div', { class: 'table-wrap' },
+        h('table', {},
+          h('thead', {}, h('tr', {},
+            th('Category'), th('Progress'), th('Correct', true), th('Incorrect', true), th('New', true), th('Total', true))),
+          h('tbody', {}, categories.map((c) => h('tr', {},
+            h('td', { text: c.category }),
+            h('td', {}, stackedBar(c)),
+            h('td', { class: 'num', text: c.correct }),
+            h('td', { class: 'num', text: c.incorrect }),
+            h('td', { class: 'num', text: c.unattempted }),
+            h('td', { class: 'num', text: c.total })
+          )))
+        )
+      )
+    );
+  }
+
+  const sortedUnique = (list) => [...new Set(list)].sort((x, y) => x.localeCompare(y, undefined, { numeric: true }));
+
+  /**
+   * Checkbox list for choosing a subset. `sel` is null (everything) or a Set of
+   * selected values; the "All" box toggles between everything and nothing.
+   */
+  function multiCheck(id, title, items, getSel, setSel, onChange) {
+    const values = items.map((it) => it.value);
+    const summary = h('span', { class: 'muted check-sum' });
+    const allBox = h('input', { type: 'checkbox', id: `${id}-all` });
+    const rows = items.map((it, i) => {
+      const cb = h('input', { type: 'checkbox', id: `${id}-${i}`, 'data-value': it.value });
+      const txt = h('span');
+      cb.addEventListener('change', guard(() => {
+        const cur = getSel();
+        const next = new Set(cur === null ? values : cur);
+        if (cb.checked) next.add(it.value); else next.delete(it.value);
+        setSel(next.size === values.length ? null : next);
+        onChange();
+      }));
+      return { it, cb, txt, el: h('label', { class: 'inline-check', for: cb.id }, cb, txt) };
+    });
+    allBox.addEventListener('change', guard(() => {
+      setSel(allBox.checked ? null : new Set());
+      onChange();
+    }));
+    function refresh() {
+      const sel = getSel();
+      let n = 0;
+      for (const r of rows) {
+        r.cb.checked = sel === null || sel.has(r.it.value);
+        if (r.cb.checked) n++;
+        r.txt.textContent = r.it.label();
+      }
+      allBox.checked = n === values.length;
+      allBox.indeterminate = n > 0 && n < values.length;
+      summary.textContent = `${n} of ${values.length} selected`;
+    }
+    refresh();
+    const node = h('fieldset', { class: 'check-group', id },
+      h('legend', { text: title }),
+      h('div', { class: 'check-head' },
+        h('label', { class: 'inline-check', for: allBox.id }, allBox, `All ${title.toLowerCase()}`),
+        summary),
+      h('div', { class: 'check-list' }, rows.map((r) => r.el)));
+    return { node, refresh };
+  }
+
+  /** Six checkbox groups (one per tinjauan) inside one collapsible block. */
+  function tjFilter(prefix, getArr, labelFn, onChange) {
+    const groups = TINJAUAN.map((t, i) => multiCheck(`${prefix}-t${t.n}`, `Tinjauan ${t.n}`,
+      t.cats.map(([code, name]) => ({ value: code, label: () => `${name} (${labelFn(i, code)})` })),
+      () => getArr()[i], (v) => { getArr()[i] = v; }, () => { onChange(); }));
+    return {
+      node: h('details', { class: 'group tj-filter', id: `${prefix}-tj` },
+        h('summary', { text: 'Tinjauan 1–6 (competency, learning domain, reasoning, species, disease group, 16 competencies)' }),
+        h('div', {}, groups.map((g) => g.node))),
+      refresh: () => groups.forEach((g) => g.refresh()),
+    };
+  }
+
+  const TJ_TITLE = Object.freeze({ 1: 'Competency area', 2: 'Learning domain (K / P / A)', 3: 'Recall or reasoning', 4: 'Animal group', 5: 'Disease group', 6: '16 competencies' });
+  /** Test setup: one collapsible block per tinjauan, each showing how many of its rows are selected. */
+  function tjSeparate(prefix, getArr, labelFn, onChange) {
+    const parts = TINJAUAN.map((t, i) => {
+      const g = multiCheck(`${prefix}-t${t.n}`, `Tinjauan ${t.n}`,
+        t.cats.map(([code, name]) => ({ value: code, label: () => `${name} (${labelFn(i, code)})` })),
+        () => getArr()[i], (v) => { getArr()[i] = v; }, () => { onChange(); });
+      const sum = h('span', { class: 'muted tj-count' });
+      const node = h('details', { class: 'group tj-block', id: `${prefix}-tj${t.n}`, open: t.n === 1 },
+        h('summary', {}, h('b', { text: `Tinjauan ${t.n}: ${TJ_TITLE[t.n]}` }), ' ', sum), g.node);
+      const refresh = () => { g.refresh(); const sel = getArr()[i]; sum.textContent = sel === null ? '(all)' : `(${sel.size} of ${t.cats.length})`; };
+      refresh();
+      return { node, refresh };
+    });
+    return { nodes: parts.map((x) => x.node), refresh: () => parts.forEach((x) => x.refresh()) };
+  }
+
+  /** "Correct/total" tables per tinjauan, for the questions of one test (answers: id -> chosen index). */
+  function tinjauanSection(items, answers) {
+    const tagged = items.filter((q) => q && hasTj(q));
+    if (!tagged.length) return null;
+    const th = (text, num) => h('th', { class: num ? 'num' : '', text });
+    const tables = TINJAUAN.map((t, i) => {
+      const rows = t.cats.map(([code, name]) => {
+        const qs = tagged.filter((q) => q.tj[i] === code);
+        return { name, total: qs.length, correct: qs.filter((q) => answers[q.id] === q.correctIndex).length };
+      }).filter((r) => r.total);
+      const total = rows.reduce((a, r) => a + r.total, 0);
+      const correct = rows.reduce((a, r) => a + r.correct, 0);
+      return h('div', { class: 'table-wrap' },
+        h('table', { class: 'tj-table' },
+          h('thead', {}, h('tr', {}, th(`Tinjauan ${t.n}`), th('Correct / total', true), th('%', true))),
+          h('tbody', {},
+            rows.map((r) => h('tr', {}, h('td', { text: r.name }), h('td', { class: 'num', text: `${r.correct}/${r.total}` }), h('td', { class: 'num', text: `${pct(r.correct, r.total)}%` }))),
+            h('tr', { class: 'tj-sum' }, h('td', { text: 'Summary' }), h('td', { class: 'num', text: `${correct}/${total}` }), h('td', { class: 'num', text: `${pct(correct, total)}%` })))));
+    });
+    return h('section', { class: 'card', id: 'tinjauan' },
+      h('h2', { text: 'Correct answers per tinjauan' }),
+      h('p', { class: 'muted', text: 'Every question belongs to one row in each of the six tables. Unanswered questions count as not correct. Labels were assigned automatically and may be imperfect.' }),
+      tables);
+  }
+
+  function testForm(stats) {
+    const scope = state.scope;
+    const sources = sortedUnique(scopeQs().map((q) => q.source));
+    const count = h('input', { id: 'count', type: 'number', min: '1', step: '1', inputmode: 'numeric' });
+    const aiBox = h('input', { id: 'include-ai', type: 'checkbox', checked: state.includeAi });
+    const corBox = h('input', { id: 'include-correct', type: 'checkbox', checked: state.includeCorrect });
+    const timerIn = h('input', { id: 'timer-min', type: 'number', min: '1', max: '600', step: '1', inputmode: 'numeric', placeholder: 'No timer' });
+    const savedTimer = Number(storage.read(KEYS.timer, 0));
+    if (savedTimer > 0) timerIn.value = String(savedTimer);
+    const info = h('p', { class: 'muted', id: 'pool-info' });
+    const start = h('button', { class: 'btn primary', type: 'submit', id: 'start', text: 'Start test' });
+
+    const avail = (sc) => scopeQs().filter((q) => inSet(sc.cats, q.category) && inSet(sc.srcs, q.source) && inTj(sc.tj || scope.tj, q)
+      && (aiBox.checked || !q.aiGenerated) && (corBox.checked || state.progress[q.id] !== 'correct')).length;
+    const tag = (n) => (n ? `${n} available` : (corBox.checked ? 'none' : 'none new'));
+
+    const srcGroup = multiCheck('x-src', 'Sources',
+      sources.map((v) => ({ value: v, label: () => `${v} (${tag(avail({ cats: scope.cats, srcs: new Set([v]) }))})` })),
+      () => scope.srcs, (v) => { scope.srcs = v; }, () => sync());
+
+    const tjGroup = tjSeparate('x', () => scope.tj, (i, code) => {
+      const tmp = scope.tj.slice(); tmp[i] = new Set([code]);
+      return tag(avail({ cats: scope.cats, srcs: scope.srcs, tj: tmp }));
+    }, () => sync());
+    const resetBtn = h('button', { class: 'btn link', type: 'button', id: 'x-reset', text: 'Reset all filters', on: { click: () => { scope.cats = null; scope.srcs = null; scope.tj = noTj(); sync(); } } });
+
+    const sync = () => {
+      state.includeAi = aiBox.checked;
+      state.includeCorrect = corBox.checked;
+      srcGroup.refresh();
+      tjGroup.refresh();
+      const { pool, repeat } = examPool(scopeQs(), state.progress, scope, aiBox.checked, corBox.checked);
+      count.max = String(pool.length);
+      const cur = parseInt(count.value, 10);
+      if (!Number.isInteger(cur) || cur < 1 || cur > pool.length) {
+        count.value = pool.length ? String(Math.min(DEFAULT_COUNT, pool.length)) : '';
+      }
+      count.disabled = start.disabled = pool.length === 0;
+      if (!pool.length) info.textContent = 'No questions in this selection. Tick at least one category and one source.';
+      else if (repeat) info.textContent = `Everything here is already answered correctly. A new test will repeat ${pool.length} question(s) for practice.`;
+      else if (corBox.checked) info.textContent = `${pool.length} question(s) available, including ones already answered correctly.`;
+      else info.textContent = `${pool.length} question(s) available: not attempted yet or answered incorrectly.`;
+    };
+    aiBox.addEventListener('change', guard(sync));
+    corBox.addEventListener('change', guard(sync));
+    sync();
+
+    return h('form', {
+      class: 'card', id: 'start-form', novalidate: true,
+      on: {
+        submit: (e) => {
+          e.preventDefault();
+          const { pool } = examPool(scopeQs(), state.progress, scope, aiBox.checked, corBox.checked);
+          const n = parseInt(count.value, 10);
+          if (!pool.length) return;
+          const mins = Math.floor(Number(timerIn.value));
+          const limit = Number.isFinite(mins) && mins >= 1 ? Math.min(mins, 600) : 0;
+          storage.write(KEYS.timer, limit);
+          startTest(scope, Number.isInteger(n) ? n : Math.min(DEFAULT_COUNT, pool.length), aiBox.checked, corBox.checked, limit);
+        },
+      },
+    },
+      h('h2', { text: 'Start a new test' }),
+      h('p', { class: 'muted', text: 'Pick the questions by tinjauan. Within one tinjauan the ticked rows are combined (any of them); across tinjauan they must all match. Leave a tinjauan on "All" to ignore it.' }),
+      tjGroup.nodes,
+      h('details', { class: 'group', id: 'x-src-block' }, h('summary', { text: 'Sources (which test or batch the questions come from)' }), srcGroup.node),
+      h('div', { class: 'row' }, resetBtn),
+      h('label', { for: 'count', text: 'Number of questions' }), count,
+      h('label', { for: 'timer-min', text: 'Timer in minutes (optional)' }), timerIn,
+      h('p', { class: 'muted', text: 'Leave empty for no time limit. When the time is up the test is submitted automatically.' }),
+      h('label', { class: 'inline-check', for: 'include-ai' }, aiBox, 'Include AI-generated questions and answers'),
+      h('label', { class: 'inline-check', for: 'include-correct' }, corBox, 'Include questions already answered correctly'),
+      info,
+      h('div', { class: 'form-actions' }, start)
+    );
+  }
 
   /* ---- BPUPKH side panels: contributors (left) and suggestions / Drive links (right) ---- */
   function contribCard() {
@@ -257,7 +1498,7 @@
     return h('section', { class: 'card side-card', id: 'contributors' },
       h('h2', { text: 'Contributors' }),
       list.length
-        ? h('ul', { class: 'contrib-list' }, list.map((c) => h('li', {}, h('b', { text: String(c.name) }), (c.role || c.uni) && h('span', { text: [c.role, c.uni].filter(Boolean).join(' · ') }))))
+        ? h('ul', { class: 'contrib-list' }, list.map((c) => (Array.isArray(c.members) && c.members.length ? h('li', {}, h('details', { class: 'contrib-group' }, h('summary', {}, h('b', { text: `${c.name} (${c.members.length})` })), h('ul', { class: 'contrib-members' }, c.members.map((m) => h('li', { text: String(m) }))))) : h('li', {}, h('b', { text: String(c.name) }), (c.role || c.uni) && h('span', { text: [c.role, c.uni].filter(Boolean).join(' · ') })))))
         : h('p', { class: 'muted', text: 'Contributors will be listed here. Want to be one? Send a suggestion or a Google Drive link on the right.' }));
   }
   let lastSuggest = 0;
@@ -296,721 +1537,653 @@
   }
   const bpupkhShell = (nodes, left, right) => h('div', { class: 'shell' }, h('aside', { class: 'left' }, left), h('div', { class: 'mainCol' }, nodes), h('aside', { class: 'right' }, right));
 
-  /* ---- back up progress: the exam history lives in this browser only ---- */
-  const PROGRESS_FORMAT = 'osce-practice-progress';
-  const histKey = (e) => `${e.t}|${e.id}|${e.name}`;
-  function exportProgress() {
-    const data = { app: PROGRESS_FORMAT, v: 1, exportedAt: new Date().toISOString(), history: loadHist() };
-    const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
-    const a = h('a', { href: url, download: `osce-progress-${new Date().toISOString().slice(0, 10)}.json` });
-    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  function tabBar() {
+    return h('div', { class: 'tabs', role: 'tablist' }, (isAdmin() ? [...TABS, ['admin', 'Admin']] : TABS).map(([id, label]) => h('button', {
+      class: `tab${state.tab === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`,
+      'aria-selected': String(state.tab === id), text: label, on: { click: () => setTab(id) },
+    })));
   }
-  function importProgress(text, replace) {
-    let d; try { d = JSON.parse(text); } catch (_) { return { ok: false, message: 'That file is not valid JSON.' }; }
-    if (!d || d.app !== PROGRESS_FORMAT || !Array.isArray(d.history)) return { ok: false, message: 'This is not an OSCE Practice progress file.' };
-    const good = d.history.filter((e) => e && typeof e.id === 'string' && Number.isFinite(e.t) && typeof e.name === 'string');
-    const base = replace ? [] : loadHist();
-    const known = new Set(base.map(histKey));
-    const add = []; for (const e of good) { const k = histKey(e); if (!known.has(k)) { known.add(k); add.push(e); } }
-    const all = base.concat(add).sort((a, b) => a.t - b.t);
-    if (!saveHist(all)) return { ok: false, message: 'Could not save: browser storage is unavailable.' };
-    return { ok: true, message: `Imported ${add.length} session${add.length === 1 ? '' : 's'}${good.length - add.length ? ` (${good.length - add.length} already present)` : ''}. History now has ${Math.min(all.length, HIST_MAX)}.` };
+
+  function focusEmpty() {
+    return h('section', { class: 'card', id: 'focus-empty' },
+      h('h2', { text: 'Fokus UKMPPDH' }),
+      h('p', { text: 'Belum ada soal di tab ini. Tab ini hanya berisi soal dari:' }),
+      h('ul', {},
+        h('li', { text: 'TO Nasional November 2026' }),
+        h('li', { text: 'SIGAP (External 1) mulai batch 49' }),
+        h('li', { text: 'SuksesUKMPPDH (External 2) mulai batch 6' })),
+      h('p', { class: 'muted', text: 'Gunakan tab "All questions" untuk seluruh soal.' }));
   }
-  function backupCard(onDone, initial) {
-    const note = h('p', { class: 'notice', role: 'status', hidden: true });
-    const say = (type, text) => { note.hidden = false; note.className = `notice ${type === 'err' ? 'err' : ''}`; note.textContent = text; };
-    if (initial) say('ok', initial);
+
+  function viewSetup() {
+    if (state.tab === 'reports') return [tabBar(), ...viewReports()];
+    if (state.tab === 'admin' && isAdmin()) return [tabBar(), ...viewAdmin()];
+    const inner = viewSetupInner();
+    const body = state.tab === 'focus' && !scopeQs().length && state.ui.panel !== 'manage' && state.ui.panel !== 'history'
+      ? [focusEmpty()] : inner;
+    return [tabBar(), ...body];
+  }
+
+  function viewSetupInner() {
+    if (state.ui.panel === 'manage') return viewManage();
+    if (state.ui.panel === 'browse') return viewBrowse();
+    if (state.ui.panel === 'history') return viewHistory();
+    if (state.ui.panel === 'print') return viewPrint();
+    const stats = computeStats(scopeQs(), state.progress);
+    const t = stats.total;
+    const nodes = [];
+
+    if (!storage.available) {
+      nodes.push(h('div', { class: 'notice err', role: 'alert' },
+        h('p', { text: 'Browser storage is unavailable (private mode or blocked). Progress will not be saved.' })));
+    }
+    if (state.problems.length) {
+      const n = state.problems.length;
+      nodes.push(h('div', { class: 'notice warn' },
+        h('p', { text: `${n} entr${n === 1 ? 'y' : 'ies'} in ${BANK_URL} ${n === 1 ? 'was' : 'were'} skipped as invalid.` }),
+        h('details', {}, h('summary', { text: 'Show details' }),
+          h('ul', {}, state.problems.slice(0, 20).map((p) => h('li', { text: p }))))));
+    }
+
+    nodes.push(h('section', { class: 'card' },
+      h('h2', { text: 'Your progress' }),
+      h('p', { class: 'big', text: `${t.correct} of ${t.total} answered correctly (${pct(t.correct, t.total)}%)` }),
+      stackedBar(t),
+      legend(t),
+      h('p', { class: 'muted', id: 'user-line' }, state.user ? `Signed in as ${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}. ` : '',
+        h('button', { class: 'linkbtn', type: 'button', id: 'change-name', text: 'Change name / university', on: { click: () => showNamePage(() => { render(); }) } })),
+      state.user && h('p', { class: 'muted', id: 'device-line' }, `Device ID: `, h('code', { text: state.user.id }), ' ',
+        h('button', { class: 'linkbtn', type: 'button', id: 'copy-device', text: 'Copy', on: { click: () => { try { navigator.clipboard.writeText(state.user.id); } catch (_) { /* ignore */ } } } }), isAdmin() && ' · Admin'),
+      h('p', { class: 'muted', id: 'participants', text: participantsText() })
+    ));
+    nodes.push(categoryTable(stats.categories));
+    nodes.push(testForm(stats));
+    nodes.push(h('div', { class: 'row' },
+      h('button', {
+        class: 'btn', type: 'button', id: 'browse', text: 'Browse all questions',
+        on: { click: () => { state.ui = freshUi('browse'); render(); } },
+      }),
+      h('button', {
+        class: 'btn', type: 'button', id: 'print-btn', text: 'Print / PDF',
+        on: { click: () => { state.ui = freshUi('print'); render(); } },
+      }),
+      h('button', {
+        class: 'btn', type: 'button', id: 'history-btn', text: `History (${tabHistory().length})`,
+        on: { click: () => { state.ui = freshUi('history'); render(); } },
+      }),
+      h('button', {
+        class: 'btn', type: 'button', id: 'manage', text: 'Import / export',
+        on: { click: () => { state.ui = freshUi('manage'); render(); } },
+      }),
+      h('button', {
+        class: 'btn', type: 'button', id: 'logout', text: 'Log out',
+        on: { click: () => { sess.clear(); window.location.reload(); } },
+      }),
+      h('button', {
+        class: 'btn danger', type: 'button', id: 'reset', text: 'Reset progress',
+        on: { click: () => { if (window.confirm('Reset all progress? Every question goes back to "not attempted".')) resetProgress(); } },
+      })
+    ));
+    nodes.push(backupCard());
+    nodes.push(howItWorksCard());
+    nodes.push(changelogCard());
+    const sendSug = async (body) => (REGISTRY_URL ? registry.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, app: 'quiz' }) }) : 'nourl');
+    const who = () => (state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : 'Unknown');
+    return [bpupkhShell(nodes, contribCard(), suggestCard(sendSug, who))];
+  }
+
+  /** Workflow, where data lives, and how to move progress to another device. */
+  function howItWorksCard() {
+    return h('section', { class: 'card howto', id: 'howto' },
+      h('details', {},
+        h('summary', { text: 'How Quiz Time works' }),
+        h('h3', { text: 'Workflow' }),
+        h('ol', {}, [
+          'Log in with the ID and password (this lasts for the current tab only).',
+          'Enter your name and university once. They are saved in this browser.',
+          'On the main menu you see your progress per category. Choose categories and sources, the number of questions and the options (AI-generated questions, include questions already answered correctly), then start a test.',
+          'During the test, choose answers, use "Mark for review" for questions you want to revisit, and "Report" if a question, choice, answer key, explanation or category looks wrong. Answers are drafts until you submit.',
+          'Submit the exam. Only the questions you answered change status (correct or incorrect). Review the result by group, with answers and explanations if you want them.',
+          'History keeps your finished exams so you can retake the same questions. "Browse all questions" lets you read the whole bank.',
+        ].map((t) => h('li', { text: t }))),
+        h('h3', { text: 'Where your data is stored' }),
+        h('ul', {}, [
+          'Your progress is stored only in this browser, on this device (browser storage). It includes the status of each question, your exam history, an exam in progress, imported questions and answer-key edits.',
+          'It is not saved on a server and not tied to your login. The ID and password only unlock the question bank.',
+          'Only your name, university, a random device code and your question reports are sent to the admin\'s Google Sheet.',
+          'Progress is lost if you clear the browser\'s site data, use private mode, open the app in another browser or on another device, or press "Reset progress". Export a backup from time to time.',
+        ].map((t) => h('li', { text: t }))),
+        h('h3', { text: 'Move your progress to another device' }),
+        h('ol', {}, [
+          'On the old device, open the main menu and find "Back up your progress". Press "Export progress". A file named progress-(date).json is downloaded.',
+          'Send that file to the new device (WhatsApp, email, Google Drive, USB cable, anything that keeps the file as it is).',
+          'On the new device, open Quiz Time, log in and enter your name and university.',
+          'On the main menu, under "Back up your progress", choose the .json file in "Import progress".',
+          'Leave "Replace current progress" unchecked to merge with what is already there. Tick it only if you want the file to overwrite everything.',
+          'Check the message that says how many questions were restored, and your progress bar.',
+        ].map((t) => h('li', { text: t }))),
+        h('p', { class: 'muted', text: 'The backup contains question progress, answer-key edits and imported questions. It does not contain exam history, an exam in progress, or your name and university; those stay on the old device.' })));
+  }
+
+  function changelogCard() {
+    return h('section', { class: 'card', id: 'changelog' },
+      h('details', {},
+        h('summary', { text: `Changelog (latest: ${CHANGELOG[0].date}, build s)` }),
+        CHANGELOG.map((e) => h('div', { class: 'cl-entry' },
+          h('h3', { text: e.date }),
+          h('ul', {}, e.items.map((t) => h('li', { text: t })))))));
+  }
+
+  function backupCard() {
+    const slot = h('div', { class: 'notice-slot' }, noticeNode(state.ui.notice));
+    refs.notice = slot;
     const replace = h('input', { id: 'pg-replace', type: 'checkbox' });
-    const fileIn = h('input', { id: 'pg-file', type: 'file', accept: '.json,application/json', on: { change: () => {
-      const f = fileIn.files && fileIn.files[0]; if (!f) return;
-      if (replace.checked && !window.confirm('Replace all current history with the backup?')) { fileIn.value = ''; return; }
-      const r = new FileReader();
-      r.onload = () => { const res = importProgress(String(r.result), replace.checked); say(res.ok ? 'ok' : 'err', res.message); fileIn.value = ''; if (res.ok && onDone) onDone(res.message); };
-      r.onerror = () => say('err', 'Could not read that file.'); r.readAsText(f);
-    } } });
-    return h('section', { class: 'card', id: 'backup' }, h('h2', { text: 'Back up your progress' }),
-      h('p', { class: 'muted', text: 'Your history (finished cases, scores and participant reports) is stored in this browser only. Export it to keep a copy or move to another device, then import it there.' }),
-      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', id: 'pg-export', text: 'Export progress', on: { click: exportProgress } })),
-      h('label', { for: 'pg-file', text: 'Import progress (.json)' }), fileIn,
-      h('label', { class: 'chk', for: 'pg-replace' }, replace, h('span', { text: 'Replace current history instead of merging' })), note);
-  }
-
-  /* ---- 0. setup ---- */
-  function home(msg) {
-    stopClock();
-    const sources = [...new Set(st.cases.map((c) => c.source))];
-    const srcSel = h('select', { id: 'source' }, h('option', { value: '', text: 'All sources' }), sources.map((s) => h('option', { value: s, text: s })));
-    srcSel.value = st.source;
-    const caseSel = h('select', { id: 'case' });
-    const done = doneIds();
-    const pool = () => st.cases.filter((c) => !srcSel.value || c.source === srcSel.value);
-    const fill = () => { st.source = srcSel.value; caseSel.replaceChildren(...pool().map((c) => h('option', { value: c.id, class: done.has(c.id) ? 'acc' : null, text: `${done.has(c.id) ? '✓ ' : ''}No. ${numOf(c)} · [${c.source}] ${c.title}` }))); };
-    srcSel.addEventListener('change', fill); fill();
-    const tm = h('input', { id: 'timer-on', type: 'checkbox', checked: st.timerOn });
-    const as = h('input', { id: 'assess-on', type: 'checkbox', checked: st.assessOn });
-    const go = (id) => { st.timerOn = tm.checked; st.assessOn = as.checked; nameStage(id); };
-    const sendSug = async (body) => (REGISTRY_URL ? registry.call(REGISTRY_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, app: 'osce' }) }) : 'nourl');
-    mount(bpupkhShell([
-      tabBar('all'),
-      h('section', { class: 'card' },
-        h('h2', { text: 'Start an OSCE case' }),
-        st.user && h('p', { class: 'muted', id: 'user-line' }, `Signed in as ${st.user.name} (${st.user.university}). `, h('button', { class: 'linkbtn', type: 'button', id: 'change-user', text: 'Change name / university', on: { click: () => userStage(home, true) } })),
-        st.user && h('p', { class: 'muted', id: 'device-line' }, 'Device ID: ', h('code', { text: st.user.id }), ' ', h('button', { class: 'linkbtn', type: 'button', id: 'copy-device', text: 'Copy', on: { click: () => { try { navigator.clipboard.writeText(st.user.id); } catch (_) { /* ignore */ } } } }), isAdmin() && ' · Admin'),
-        h('p', { class: 'muted', id: 'visitors', text: visitorsText() }),
-        h('p', { class: 'muted', text: `${st.cases.length} cases. Two people: the examiner operates the app, the examinee reads the case on screen first.` }),
-        h('div', { class: 'sel' }, h('label', { for: 'source', text: 'Source:' }), srcSel),
-        h('div', { class: 'sel' }, h('label', { for: 'case', text: 'Case:' }), caseSel),
-        h('label', { class: 'chk', for: 'timer-on' }, tm, h('span', { text: 'Use timers (2 min read · 18 min examiner stage with reminders at 10, 5 and 3 minutes left; the next stage opens by itself when time is up)' })),
-        h('label', { class: 'chk', for: 'assess-on' }, as, h('span', { text: 'Use the checklist assessment form (floating checklist in stage 2, completed in an extra stage, with scores in the results)' })),
-        h('div', { class: 'row' },
-          h('button', { class: 'btn primary', id: 'start', text: 'Start selected case', on: { click: () => go(caseSel.value) } }),
-          h('button', { class: 'btn', id: 'solo', text: 'Single-player mode', title: 'Do the selected case on your own, without an examiner', on: { click: () => window.OSCE_SOLO && window.OSCE_SOLO.start(caseSel.value) } }),
-          h('button', { class: 'btn', id: 'random', text: 'Random case', on: { click: () => { const p = pool(); go(p[Math.floor(Math.random() * p.length)].id); } } }),
-          h('button', { class: 'btn', id: 'logout', text: 'Log out', on: { click: () => { sess.clear(); window.location.reload(); } } }))),
-      h('section', { class: 'card' }, h('h2', { text: 'Browse' }),
-        h('div', { class: 'row' },
-          h('button', { class: 'btn', id: 'all-q', text: `All questions (${st.cases.length})`, on: { click: () => questions() } }),
-          h('button', { class: 'btn', id: 'hist', text: `History (${loadHist().length})`, on: { click: () => history() } }))),
-      backupCard((m) => home(m), typeof msg === 'string' ? msg : ''),
-      h('section', { class: 'card', id: 'changelog' }, h('h2', { text: 'Changelog' }),
-        CHANGELOG.map((e, i) => h('details', { class: 'cl', open: i === 0 }, h('summary', {}, h('strong', { text: e.v }), ` · ${e.d}`), lines(e.items))))],
-      contribCard(), suggestCard(sendSug, () => (st.user ? `${st.user.name} (${st.user.university})` : 'Unknown'))));
-  }
-
-  /* ---- 0b. participant name; the 2-minute clock starts only after this is confirmed ---- */
-  function nameStage(id) {
-    stopClock();
-    const err = h('p', { class: 'notice err', role: 'alert', hidden: true });
-    const names = [...new Set(loadHist().map((e) => e.name))];
-    const name = h('input', { id: 'p-name', type: 'text', maxlength: '60', autocomplete: 'off', list: 'p-names', value: st.name });
-    mount(h('form', {
-      class: 'card', id: 'name-form', novalidate: true,
+    const fileIn = h('input', {
+      id: 'pg-file', type: 'file', accept: '.json,application/json',
       on: {
-        submit: (e) => {
-          e.preventDefault();
-          const v = name.value.replace(/\s+/g, ' ').trim();
-          if (v.length < 2) { err.hidden = false; err.textContent = 'Enter the participant’s name (at least 2 characters).'; name.focus(); return; }
-          st.name = v.slice(0, 60); store.write(NAME_KEY, st.name);
-          st.caseId = id; st.reveal = false; st.entry = null; st.opened = new Set(); st.chk = new Set(); st.xchk = new Set(); st.ovr = {}; if (st.assessOn) panelBuild();
-          briefStage();
+        change: () => {
+          const file = fileIn.files && fileIn.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = guard(() => {
+            if (replace.checked && !window.confirm('Replace all current progress with the backup?')) { fileIn.value = ''; return; }
+            const res = importProgress(String(reader.result), replace.checked);
+            state.ui.notice = { type: res.ok ? 'ok' : 'err', text: res.message };
+            render();
+          });
+          reader.onerror = guard(() => paintNotice('err', 'Could not read that file.'));
+          reader.readAsText(file);
         },
       },
-    },
-      h('h2', { text: 'Participant' }),
-      h('p', { class: 'muted', text: st.timerOn ? 'Enter the examinee’s name. The 2-minute reading time starts when you confirm.' : 'Enter the examinee’s name, then confirm to show the case.' }),
-      h('label', { for: 'p-name', text: 'Name' }), name, h('datalist', { id: 'p-names' }, names.map((x) => h('option', { value: x }))), err,
-      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit', id: 'name-go', text: 'Confirm and start' }), h('button', { class: 'btn', type: 'button', id: 'name-cancel', text: 'Cancel', on: { click: home } }))));
-    name.focus();
+    });
+    return h('section', { class: 'card', id: 'backup' },
+      h('h2', { text: 'Back up your progress' }),
+      h('p', { class: 'muted', text: 'Progress is stored in this browser only. Export it to keep a copy or to move to another device or browser, then import it there.' }),
+      slot,
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'button', id: 'pg-export', text: 'Export progress', on: { click: exportProgress } })),
+      h('label', { for: 'pg-file', text: 'Import progress (.json)' }), fileIn,
+      h('label', { class: 'inline-check', for: 'pg-replace' }, replace, 'Replace current progress instead of merging')
+    );
   }
 
-  /* ---- 1. examinee reads the case (2 min) ---- */
-  function briefStage() {
-    const c = cur();
-    const next = h('button', { class: 'btn primary', id: 'next1', text: 'Next →', hidden: st.timerOn, on: { click: () => examStage() } });
-    if (st.timerOn) startClock(T.brief, (why) => { if (why === 'done') examStage(); else next.hidden = false; }, null, 2); else stopClock();
-    mount(
-      stage(1, 'Examinee reads the case'),
-      h('section', { class: 'card' },
-        h('h2', { text: 'Case' }), st.timerOn && timerBlock(),
-        scenario(c),
-        h('div', { class: 'row' }, next, h('button', { class: 'btn', text: 'Cancel', on: { click: home } }))));
-  }
+  /** The whole question database, filterable by status, category and text. */
+  function viewBrowse() {
+    const f = state.ui.filter;
+    const inTab = scopeQs();
+    const categories = sortedUnique(inTab.map((q) => q.category));
+    const sources = sortedUnique(inTab.map((q) => q.source));
+    const totalBy = (key) => {
+      const m = new Map();
+      for (const q of inTab) m.set(q[key], (m.get(q[key]) || 0) + 1);
+      return m;
+    };
+    const catTotals = totalBy('category');
+    const srcTotals = totalBy('source');
 
-  /* ---- 2. examiner stage (15 min) ---- */
-  const INTERP_CLASS = { Increased: 'up', Decreased: 'down', Positive: 'up', Normal: 'ok' };
-  /** Lab table with the interpretation (Increased / Decreased / Normal) colour-coded next to the reference range. */
-  function resultTable(rows) {
-    return h('div', { class: 'tbl-wrap' }, h('table', { class: 'lab' },
-      h('thead', {}, h('tr', {}, ['Parameter', 'Result', 'Reference range', 'Interpretation'].map((x) => h('th', { text: x })))),
-      h('tbody', {}, rows.map((r) => h('tr', {}, r.slice(0, 4).map((v, i) => h('td', { text: v, class: (i === 3 || i === 1) ? INTERP_CLASS[r[3]] || '' : '' })))))),
-      h('p', { class: 'muted', text: 'Reference ranges are general values. Figures are example values for practice.' }));
-  }
-  /** Exam view: table, image, or (when the test has no image) the written result. `full` (stage 4, All questions) also shows the finding and explanation. */
-  const resultBody = (x, full) => {
-    const hasImg = !!(x.images && x.images.length);
-    const any = (x.quote && x.quote.length) || x.text || x.table || hasImg || x.finding;
-    return [
-      (x.quote || []).map((q) => h('p', { class: 'result-text quote', text: q })),
-      x.text && h('p', { class: 'result-text', text: x.text }),
-      x.table && resultTable(x.table),
-      (x.images || []).map((im) => h('figure', {}, h('img', { src: im.src, alt: x.label }))),
-      !full && !hasImg && x.finding && h('p', { class: 'result-text', text: x.finding }),
-      !full && !any && h('p', { class: 'muted', text: 'No result data for this test yet.' }),
-      full && x.finding && h('p', { class: 'result-text', text: `Finding: ${x.finding}` }),
-      full && x.explain && h('p', { class: 'muted', text: `Interpretation: ${x.explain}` }),
-    ];
-  };
-  const PE = 'Pemeriksaan fisik';
-  const aiTest = (x) => (x.ai ? h('span', { class: 'badge ai', text: 'Example data created by AI' }) : null);
-  const numOf = (c) => c.no || st.cases.indexOf(c) + 1;
-  const doneIds = () => new Set(loadHist().map((e) => e.id)); // cases already finished (green)
-  const peOf = (c) => c.tests.find((t) => t.label === PE);
-  const otherTests = (c) => c.tests.filter((t) => t.label !== PE);
-  /** Case text plus every physical examination finding (shown in stages 1 and 2). */
-  function scenario(c) {
-    const pe = peOf(c);
-    return [h('p', { class: 'problem', id: 'problem', text: c.brief.text }),
-      pe && h('div', { class: 'pe', id: 'pe' }, h('h3', { text: 'Physical examination' }), (pe.quote || []).map((q) => h('p', { class: 'problem', text: q })))];
-  }
-  function testView(x) {
-    st.opened.add(x.label);
-    mount(
-      h('div', { class: 'row' }, h('button', { class: 'btn', id: 'back', text: '← Back to examiner view', on: { click: () => examStage(true) } })),
-      h('section', { class: 'card', id: 'result' }, h('h2', {}, x.label, aiTest(x)), resultBody(x)));
-    panelSet(true); panelMinimize();
-  }
-  function examStage(resume) {
-    const c = cur();
-    if (resume !== true) { if (st.timerOn) startClock(T.exam, (why) => { if (why === 'done') afterExam(); }, REMINDERS, 4); else stopClock(); st.reveal = false; }
-    const reveal = h('input', { id: 'reveal', type: 'checkbox', checked: st.reveal });
-    const ans = h('div', { id: 'answer' });
+    const status = h('select', { id: 'b-status' },
+      h('option', { value: 'all', text: 'All statuses' }),
+      h('option', { value: 'correct', text: STATUS_LABEL.correct }),
+      h('option', { value: 'incorrect', text: STATUS_LABEL.incorrect }),
+      h('option', { value: 'unattempted', text: STATUS_LABEL.unattempted })
+    );
+    const query = h('input', { id: 'b-query', type: 'text', placeholder: 'Search question text', autocomplete: 'off' });
+    status.value = f.status;
+    query.value = f.query;
+
+    const count = h('p', { class: 'muted', id: 'b-count' });
+    const list = h('ul', { class: 'review', id: 'b-list' });
+    const note = h('p', { class: 'muted', id: 'b-note', role: 'status' });
+    let editingId = null;
+
+    const editorNode = (q) => {
+      const sel = h('select', { id: 'e-correct' },
+        q.options.map((t, i) => h('option', { value: String(i), text: `${letter(i)}. ${t}` })));
+      sel.value = String(q.correctIndex);
+      const expl = h('textarea', { id: 'e-expl' });
+      expl.value = q.explanation;
+      const ai = h('input', { id: 'e-ai', type: 'checkbox', checked: q.aiGenerated });
+      return h('div', { class: 'editor' },
+        h('label', { for: 'e-correct', text: 'Correct answer' }), sel,
+        h('label', { for: 'e-expl', text: 'Explanation' }), expl,
+        h('label', { class: 'inline-check' }, ai, 'Still AI-generated (untick once you have verified it)'),
+        h('div', { class: 'row form-actions' },
+          h('button', {
+            class: 'btn primary', type: 'button', id: 'e-save', text: 'Save',
+            on: {
+              click: () => {
+                const res = saveEdit(q.id, { correctIndex: Number(sel.value), explanation: expl.value.trim(), aiGenerated: ai.checked });
+                editingId = null;
+                note.textContent = res.changedKey
+                  ? `${q.id}: answer key changed. Its status was reset to not attempted.`
+                  : `${q.id}: saved.`;
+                paint();
+              },
+            },
+          }),
+          h('button', { class: 'btn', type: 'button', id: 'e-cancel', text: 'Cancel', on: { click: () => { editingId = null; paint(); } } }),
+          state.edits[q.id] && h('button', {
+            class: 'btn danger', type: 'button', id: 'e-revert', text: `Revert to ${BANK_URL}`,
+            on: {
+              click: () => {
+                const res = revertEdit(q.id);
+                editingId = null;
+                note.textContent = res.changedKey
+                  ? `${q.id}: reverted. Its status was reset to not attempted.`
+                  : `${q.id}: reverted.`;
+                paint();
+              },
+            },
+          })
+        )
+      );
+    };
+
+    const itemNode = (q) => {
+      const s = state.progress[q.id] || 'unattempted';
+      const li = h('li', { class: `review-item${s === 'incorrect' ? ' wrong' : ''}` },
+        h('div', { class: 'q-head' },
+          h('span', { text: labelOf(q) }),
+          h('span', { class: 'badges' },
+            q.remoteEdit && h('span', { class: 'badge edited', text: 'Edited by admin' }),
+            state.edits[q.id] && h('span', { class: 'badge edited', text: 'Edited' }),
+            statusBadge(s))
+        ),
+        stemNodes(q),
+        staticOptions(q, undefined, f.reveal),
+        f.reveal && aiNote(q),
+        f.reveal && explanationNode(q),
+        f.reveal && questionReports(q)
+      );
+      if (editingId === q.id) li.append(isAdmin() ? adminEditor(q, () => { editingId = null; paint(); }) : editorNode(q));
+      else {
+        li.append(h('div', { class: 'row item-actions' }, h('button', {
+          class: 'btn', type: 'button', 'data-edit': q.id, text: isAdmin() ? '✎ Edit question (admin)' : 'Edit answer key',
+          on: { click: () => { editingId = q.id; note.textContent = ''; paint(); } },
+        })));
+      }
+      li.append(reportControl(q));
+      return li;
+    };
+
     const paint = () => {
-      if (reveal.checked) ans.replaceChildren(h('p', {}, h('strong', { text: 'Diagnosis: ' }), c.diagnosis), h('strong', { text: 'Treatment:' }), lines(c.treatment));
-      else ans.replaceChildren('Diagnosis and treatment are hidden.');
-      ans.className = reveal.checked ? '' : 'hidden-box';
+      f.status = status.value;
+      f.query = query.value;
+      const needle = f.query.trim().toLowerCase();
+      const rows = inTab.filter((q) => {
+        const s = state.progress[q.id] || 'unattempted';
+        return (f.status === 'all' || s === f.status)
+          && inSet(f.cats, q.category) && inSet(f.srcs, q.source) && inTj(f.tj, q)
+          && (!needle || q.question.toLowerCase().includes(needle) || q.id.toLowerCase() === needle);
+      });
+      count.textContent = `Showing ${rows.length} of ${inTab.length} questions.`;
+      list.replaceChildren(...(rows.length
+        ? rows.map(itemNode)
+        : [h('li', { class: 'muted', text: 'No questions match these filters.' })]));
     };
-    reveal.addEventListener('change', () => { st.reveal = reveal.checked; paint(); });
+    const revealBox = h('input', { id: 'b-reveal', type: 'checkbox', checked: f.reveal });
+    revealBox.addEventListener('change', guard(() => { f.reveal = revealBox.checked; paint(); }));
+    status.addEventListener('change', guard(paint));
+    query.addEventListener('input', guard(paint));
+    const catGroup = multiCheck('b-cat', 'Categories',
+      categories.map((c) => ({ value: c, label: () => `${c} (${catTotals.get(c)})` })),
+      () => f.cats, (v) => { f.cats = v; }, () => { catGroup.refresh(); paint(); });
+    const srcGroup = multiCheck('b-src', 'Sources',
+      sources.map((v) => ({ value: v, label: () => `${v} (${srcTotals.get(v)})` })),
+      () => f.srcs, (v) => { f.srcs = v; }, () => { srcGroup.refresh(); paint(); });
+    const tjGroup = tjFilter('b', () => f.tj, (i, code) => inTab.filter((q) => tjOf(q, i) === code).length, () => { tjGroup.refresh(); paint(); });
     paint();
-    mount(
-      stage(2, 'Examiner (18 min)'),
-      h('section', { class: 'card' }, h('h2', { text: `No. ${numOf(c)} · ${c.title}` }), st.timerOn && timerBlock(),
-        h('p', { class: 'muted', text: 'You answer the examinee’s history-taking questions using the expected responses below.' }),
-        c.incomplete && h('p', { class: 'notice', text: 'This source case is incomplete (no history answers, test results or prescription).' })),
-      h('section', { class: 'card', id: 'question' }, h('h2', { text: 'Case' }), scenario(c)),
-      h('section', { class: 'card' }, h('h2', { text: 'Expected anamnesis answers' }),
-        c.anamnesis.length ? c.anamnesis.map((x) => h('div', { class: 'qa' }, h('div', { class: 'q', text: x.q }), h('div', { text: x.a })))
-          : h('p', { class: 'muted', text: 'No anamnesis answers in the source.' })),
-      h('section', { class: 'card' }, h('h2', { text: 'Diagnostic results' }),
-        h('p', { class: 'muted', text: 'Give these only when the examinee asks for the test. Each opens on its own page.' }),
-        h('div', { class: 'links' }, otherTests(c).map((x) => h('button', { class: 'linkbtn', text: x.label + ((x.images || []).length ? ' (image)' : '') + (x.table ? ' (table)' : '') + (st.opened.has(x.label) ? ' ✓' : ''), on: { click: () => testView(x) } })))),
-      h('section', { class: 'card' }, h('h2', { text: 'Answer key' }),
-        h('label', { class: 'chk', for: 'reveal' }, reveal, h('span', { text: 'Show diagnosis and treatment' })), ans),
-      h('div', { class: 'row' }, h('button', { class: 'btn primary', id: 'next2', text: st.assessOn ? 'Next: complete the assessment →' : 'Finish', on: { click: afterExam } })));
-    panelSet(true);
-  }
 
-  /* the 18-minute stage ends (button or time up): on to the assessment form, or straight to the results */
-  function afterExam() { stopClock(); if (st.assessOn) assessStage(); else end(); }
-
-  /* ---- checklist assessment: the teacher's form (Form/Rubrik Penilaian; 10 rows, score 1–4, total 400, pass ≥ 250). Items stay in Indonesian. ---- */
-  const cnt = (a, set) => a.items.filter((i) => set.has(i.id)).length;
-  /** Teacher's definition: 1 none · 2 exactly one indicator · 3 some · 4 all. */
-  const autoScore = (a, set) => { if (a.sc) return a.sc(a.items.map((i) => set.has(i.id))); const k = cnt(a, set), n = a.items.length; return k === 0 ? 1 : k === n ? 4 : k === 1 ? 2 : 3; };
-  /** unit = points per score step (row max = unit × 4); pct = the weight printed on the form. */
-  const R = (no, name, pct, unit, items, sc) => ({ id: `r${no}`, no, name, pct, unit, sc, items: items.map((t, i) => ({ id: `${no}.${i + 1}`, t })) });
-  const OLD_ASSESS = [
-    { id: 'S1', title: 'St.1 Komunikasi Profesional (30%)', aspects: [
-      R(1, 'Salam dan perkenalan kepada klien', 10, 10, ['Mengucapkan salam kepada klien', 'Memperkenalkan diri sebagai dokter hewan', 'Bersikap/attitude yang sangat baik (ramah, kontak mata, empati)']),
-      R(2, 'Perilaku profesional dan informed consent', 10, 10, ['Menunjukkan perilaku profesional', 'Melibatkan klien dalam pengambilan keputusan/informed consent', 'Bertindak sesuai prioritas', 'Memperhatikan kenyamanan klien dan pasien', 'Melakukan tindakan secara legeartis']),
-      R(3, 'Saran dan edukasi kepada klien', 10, 10, ['Memberikan saran kepada klien', 'Memberikan edukasi kepada klien', 'Bersikap profesional', 'Melakukan setiap tindakan secara teliti'])] },
-    { id: 'S2', title: 'St.2 Diagnosa Klinik (50%)', aspects: [
-      R(4, 'Anamnesis', 5, 5, ['Keluhan utama klien', 'Riwayat penyakit', 'Riwayat pengobatan', 'Status vaksinasi']),
-      R(5, 'Pemeriksaan fisik', 10, 10, ['Sesuai masalah klinis pasien', 'Runut', 'Sistematis', 'Legeartis']),
-      R(6, 'Pemeriksaan penunjang dan interpretasi', 15, 10, ['Menentukan jenis pemeriksaan penunjang yang sesuai (rontgen, USG, EKG, mikroskopis, hematologi, kimia darah, kit tes)', 'Pemeriksaan penunjang menunjang diagnosis definitif', 'Menginterpretasi hasilnya dengan benar']),
-      R(7, 'Diagnosis banding', 10, 5, ['Menyebutkan diagnosis banding yang sesuai', 'Menyebutkan lebih dari satu diagnosis banding', 'Menegakkan diagnosis banding untuk menetapkan diagnosis definitif']),
-      R(8, 'Diagnosis definitif dan prognosa', 10, 20, ['Menegakkan diagnosis definitif dengan benar', 'Menentukan prognosa dengan benar'])] },
-    { id: 'S3', title: 'St.3 Reseptir & Terapeutik (20%)', aspects: [
-      R(9, 'Resep', 15, 15, ['Tepat indikasi', 'Tepat dosis', 'Tepat sediaan', 'Tepat cara pemberian']),
-      R(10, 'Ambulator', 5, 5, ['Anamnesis', 'Status present', 'Pemeriksaan fisik', 'Pemeriksaan penunjang'])] },
-  ];
-  const ASSESS = [
-    { id: 'S1', title: 'St.1 Komunikasi Profesional (20%)', aspects: [
-      R(1, 'Komunikasi dan/atau edukasi klien', 10, 10, ['Membina hubungan baik dengan klien secara verbal dan non verbal (ramah, terbuka, kontak mata, salam, empati, komunikasi 2 arah, respon)', 'Memberi kesempatan klien bercerita dan mengarahkan cerita', 'Melibatkan klien dalam membuat keputusan dan pemeriksaan klinik (informed consent)', 'Memberikan edukasi kepada klien sesuai dengan masalah pasien']),
-      R(2, 'Perilaku profesional', 10, 10, ['Meminta izin secara lisan', 'Melakukan setiap tindakan dengan berhati-hati dan teliti sehingga tidak membahayakan pasien dan diri sendiri', 'Memperhatikan kenyamanan pasien', 'Melakukan tindakan sesuai prioritas', 'Menunjukkan rasa sayang/welfare kepada pasien', 'Mengetahui keterbatasan dengan merujuk atau melakukan konsultasi bila diperlukan'],
-        (b) => { const p = b.slice(1).filter(Boolean).length; return !b[0] ? (p ? 2 : 1) : p <= 2 ? 2 : p <= 4 ? 3 : 4; })] },
-    { id: 'S2', title: 'St.2 Diagnosa Klinik (50%)', aspects: [
-      R(3, 'Anamnesa', 10, 10, ['Menanyakan keluhan utama', 'Riwayat penyakit sekarang', 'Riwayat pengobatan sebelumnya', 'Riwayat penyakit terdahulu'],
-        (b) => { const p = b.slice(1).filter(Boolean).length; return !b[0] ? 1 : p <= 1 ? 2 : p === 2 ? 3 : 4; }),
-      R(4, 'Pemeriksaan fisik', 10, 10, ['Pemeriksaan fisik sesuai masalah klinik pasien', 'Menggunakan teknik yang benar', 'Sistematis dan legeartis'],
-        (b) => (!b[0] ? 1 : !b[1] ? 2 : !b[2] ? 3 : 4)),
-      R(5, 'Interpretasi hasil pemeriksaan penunjang', 15, 15, ['Mengusulkan pemeriksaan penunjang kepada klien', 'Pemeriksaan penunjang yang diusulkan benar sesuai dengan skenario', 'Interpretasi hasil dengan tepat'],
-        (b) => (!b[0] ? 1 : !b[1] ? 2 : !b[2] ? 3 : 4)),
-      R(6, 'Diagnosa dan diagnosa banding', 5, 5, ['Menetapkan diagnosa dengan benar', 'Menetapkan 1 diagnosa banding dengan benar', 'Menentukan lebih dari 1 diagnosa banding dengan benar'],
-        (b) => { const dd = b[1] || b[2]; return b[0] && b[2] ? 4 : b[0] && dd ? 3 : b[0] || dd ? 2 : 1; }),
-      R(7, 'Ambulator', 10, 10, ['Anamnesis', 'Status present', 'Pemeriksaan fisik', 'Pemeriksaan penunjang'])] },
-    { id: 'S3', title: 'St.3 Reseptir & Terapeutik (30%)', aspects: [
-      R(8, 'Pemilihan obat', 20, 20, ['Memilih obat dengan tepat sesuai indikasi', 'Menentukan bentuk sediaan obat dengan tepat', 'Menetapkan dosis dengan tepat'],
-        (b) => (!b[0] ? 1 : 2 + (b[1] ? 1 : 0) + (b[2] ? 1 : 0))),
-      R(9, 'Penulisan resep', 10, 10, ['Identitas pasien dan klien', 'Komponen obat', 'Instruksi pemberian obat', 'Identitas dokter pemberi resep'])] },
-  ];
-  /** Rubrics by form number: 2 = first teacher form (kept so old history still reads), 3 = Kertas Kerja Penilai OSCE UKMPPDH 2025 (current). */
-  const FORMS = { 2: { ASSESS: OLD_ASSESS }, 3: { ASSESS } };
-  Object.values(FORMS).forEach((f) => { f.ALL = f.ASSESS.flatMap((S) => S.aspects.flatMap((a) => a.items.map((i) => ({ ...i, S, a })))); });
-  const FORM_NOW = 3;
-  const PASS_OF = { 2: 250, 3: 250 }; const MAX_OF = { 2: 400, 3: 400 };
-  const PASS = PASS_OF[FORM_NOW]; const MAXS = MAX_OF[FORM_NOW];
-  /* items of the extra checklist that the 2025 rubric already covers (removed; ids stay index-based) */
-  const DROPPED = new Set(['x2.3', 'x4.4', 'x4.5', 'x4.6', 'x5.2', 'x5.3', 'x5.4', 'x5.7', 'x5.8', 'x5.10', 'x6.2']);
-  /* extra checklist: kept apart from the rubric (not scored, not part of stations 1–3); items already in the rubric are left out */
-  const EXTRA = { title: 'Cek tambahan (di luar penilaian)', groups: [
-    { id: 'x1', name: '1. Persiapan & Komunikasi Awal', items: [
-      { t: 'Membaca skenario kasus dan instruksi tugas di pintu stase', hint: 'Perhatikan batas waktu dan fokus perintah (misal: lakukan anamnesis saja atau sampai terapi)' },
-      { t: 'Mengonfirmasi sinyalemen pasien', hint: 'Tanyakan nama hewan, spesies, ras, umur, jenis kelamin, dan bobot badan' }] },
-    { id: 'x2', name: '2. Biosafety & Restraint Pasien', items: [
-      { t: 'Melakukan cuci tangan 6 langkah WHO (hand hygiene)', hint: 'Lepaskan jam tangan/perhiasan dan gunakan handrub atau sabun sebelum kontak pasien' },
-      { t: 'Mengenakan Alat Pelindung Diri (APD) sesuai kebutuhan stase', hint: 'Sarung tangan (handscoon), masker, jas lab, atau apron timbal di stase radiologi' },
-      { t: 'Melakukan handling dan restraint yang aman bagi hewan serta pemeriksa', hint: 'Pastikan posisi hewan stabil dan minim stres sebelum memulai prosedur medis' }] },
-    { id: 'x3', name: '3. Eksekusi Tindakan Klinis', items: [
-      { t: 'Menyiapkan alat dan bahan medis secara aseptis', hint: 'Periksa kelengkapan instrumen, tanggal kedaluwarsa obat, dan sterilitas alat' },
-      { t: 'Melakukan prosedur klinis secara sistematis sesuai SOP stase', hint: 'Sampaikan tindakan atau temuan klinis secara verbal kepada penguji bila diminta' }] },
-    { id: 'x4', name: 'DO · Persiapan & komunikasi', items: [
-      { t: 'Menyiapkan pulpen dan papan jalan' },
-      { t: 'Menanyakan identitas owner' },
-      { t: 'Meminta waktu sebentar ke owner untuk membaca form rekam medis dan menyusun urutan pengisian' },
-      { t: 'Selalu meminta izin owner sebelum melakukan sesuatu ke hewan', hint: 'Sebelum menimbang, mengukur suhu, dan mengambil sampel untuk pemeriksaan penunjang' },
-      { t: 'Ramah dan tersenyum, menunjukkan kasih sayang kepada hewan (walau hanya boneka)' },
-      { t: 'Sebelum menyudahi konsultasi, menanyakan apakah owner ada yang ingin ditanyakan' }] },
-    { id: 'x5', name: 'DO · Urutan pemeriksaan & penjelasan', items: [
-      { t: 'Anamnesis selengkap-lengkapnya dulu, baru pemeriksaan fisik' },
-      { t: 'Pemeriksaan fisik berurutan: inspeksi, palpasi, auskultasi' },
-      { t: 'Pemeriksaan fisik menyeluruh dari kepala sampai anus, walau keluhan hanya di beberapa bagian' },
-      { t: 'Handling halus, memperlakukan boneka seperti hewan sungguhan' },
-      { t: 'Menjelaskan diagnosis diferensial dulu sebelum pemeriksaan penunjang' },
-      { t: 'Pemeriksaan penunjang dilakukan di meja pemeriksaan' },
-      { t: 'Meminta hasil pemeriksaan penunjang yang spesifik dan lengkap', hint: 'Misal hematologi lengkap atau kimia darah, bukan hanya "cek darah"' },
-      { t: 'Meminta hasil pemeriksaan darah dulu sebelum test kit apa pun' },
-      { t: 'Menjelaskan prognosis kepada owner' },
-      { t: 'Bila penyakit zoonotik, mengedukasi klien tentang zoonosis' }] },
-    { id: 'x6', name: 'DON’T · centang bila TIDAK dilakukan', items: [
-      { t: 'Tidak memakai nama alias saat perkenalan' },
-      { t: 'Tidak meninggalkan hewan sendirian di meja pemeriksaan' },
-      { t: 'Tidak menjelaskan kondisi hewan sambil berdiri di depan meja klien' },
-      { t: 'Tidak memainkan pulpen di depan owner' },
-      { t: 'Tidak menanyakan sinyalemen yang tidak perlu', hint: 'Bila tidak ada datanya, sebutkan saja sesuai bonekanya' }] },
-  ].map((g) => ({ ...g, items: g.items.map((it, i) => ({ ...it, id: `${g.id}.${i + 1}` })).filter((it) => !DROPPED.has(it.id)) })) };
-  EXTRA.items = EXTRA.groups.flatMap((g) => g.items.map((i) => ({ ...i, g })));
-  const ALL_ITEMS = FORMS[FORM_NOW].ALL;
-  const num1 = (x) => (Math.round(x * 10) / 10).toString();
-  /** Score per row 1–4: from the ticked items unless the examiner set it by hand (`ovr`: row id → 1–4). Points = unit × score; total out of 400. */
-  function compute(set, ovr, form) {
-    const stations = FORMS[form || FORM_NOW].ASSESS.map((S) => {
-      const aspects = S.aspects.map((a) => { const manual = ovr && ovr[a.id]; const score = manual || autoScore(a, set); return { a, score, manual: !!manual, earned: a.unit * score }; });
-      return { S, aspects, earned: aspects.reduce((t, x) => t + x.earned, 0), max: S.aspects.reduce((t, a) => t + a.unit * 4, 0) };
-    });
-    const earned = stations.reduce((t, x) => t + x.earned, 0);
-    return { stations, earned, max: stations.reduce((t, x) => t + x.max, 0), pass: earned >= PASS_OF[form || FORM_NOW], passMark: PASS_OF[form || FORM_NOW] };
-  }
-  /** The station groups with checkboxes. `live` keeps the state in st.chk and updates every open checklist. */
-  const chkRoots = [];
-  function checklistNode() {
-    const sums = [];
-    const root = h('div', { class: 'chk-list' }, ASSESS.map((S) => {
-      const sum = h('span', { class: 'muted' }); sums.push([S, sum]);
-      return h('details', { class: 'chk-st' }, h('summary', {}, h('strong', { text: S.title }), ' ', sum),
-        S.aspects.map((a) => { const b = h('span', { class: 'badge' }); sums.push([a, b]);
-          const sel = h('select', { class: 'ovr', 'data-ovr': a.id, 'aria-label': `Skor manual ${a.name}`, on: { change: (e) => { if (e.target.value) st.ovr[a.id] = Number(e.target.value); else delete st.ovr[a.id]; chkRefresh(); } } }, h('option', { value: '', text: 'Auto' }), [1, 2, 3, 4].map((n) => h('option', { value: String(n), text: `Skor ${n}` })));
-          return h('div', { class: 'chk-asp' }, h('h4', {}, `${a.no}. ${a.name} `, b, ' ', sel),
-            a.items.map((it) => h('label', { class: 'chk-it' }, h('input', { type: 'checkbox', 'data-id': it.id, checked: st.chk.has(it.id), on: { change: (e) => { if (e.target.checked) st.chk.add(it.id); else st.chk.delete(it.id); chkRefresh(); } } }), h('span', { text: it.t }))));
-        }));
-    }));
-    const xsum = h('span', { class: 'muted' });
-    root.append(h('details', { class: 'chk-st chk-extra' }, h('summary', {}, h('strong', { text: EXTRA.title }), ' ', xsum),
-      EXTRA.groups.map((g) => h('div', { class: 'chk-asp' }, h('h4', { text: g.name }),
-        g.items.map((it) => h('label', { class: 'chk-it' }, h('input', { type: 'checkbox', 'data-x': it.id, checked: st.xchk.has(it.id), on: { change: (e) => { if (e.target.checked) st.xchk.add(it.id); else st.xchk.delete(it.id); chkRefresh(); } } }),
-          h('span', {}, it.t, it.hint && h('span', { class: 'hint', text: it.hint }))))))));
-    root.refresh = () => {
-      xsum.textContent = `· tidak dinilai · ${st.xchk.size}/${EXTRA.items.length} dicentang`;
-      root.querySelectorAll('input[data-x]').forEach((i) => { i.checked = st.xchk.has(i.dataset.x); });
-      const r = compute(st.chk, st.ovr);
-      for (const [o, el] of sums) {
-        if (o.aspects) { const x = r.stations.find((y) => y.S === o); el.textContent = `· ${o.aspects.reduce((t, a) => t + cnt(a, st.chk), 0)}/${o.aspects.reduce((t, a) => t + a.items.length, 0)} ticked · ${num1(x.earned)}/${x.max}`; }
-        else { const x = r.stations.flatMap((y) => y.aspects).find((y) => y.a === o); el.textContent = `Skor ${x.score}/4${x.manual ? ' (manual)' : ''}`; }
-      }
-      root.querySelectorAll('input[data-id]').forEach((i) => { i.checked = st.chk.has(i.dataset.id); });
-      root.querySelectorAll('select[data-ovr]').forEach((i) => { i.value = st.ovr[i.dataset.ovr] ? String(st.ovr[i.dataset.ovr]) : ''; });
-    };
-    chkRoots.push(root); root.refresh(); return root;
-  }
-  function chkRefresh() {
-    for (let i = chkRoots.length - 1; i >= 0; i--) { if (!chkRoots[i].isConnected) chkRoots.splice(i, 1); else chkRoots[i].refresh(); }
-    const t = document.getElementById('chk-total');
-    if (t) t.textContent = `${num1(compute(st.chk, st.ovr).earned)}/${MAXS} · ${st.chk.size}/${ALL_ITEMS.length}`;
-  }
-  /* floating, minimizable panel shown in stage 2 */
-  let panelEl = null;
-  function panelBuild() {
-    if (panelEl) panelEl.remove();
-    const body = h('div', { class: 'chk-body' }, checklistNode());
-    const min = h('button', { class: 'btn', type: 'button', id: 'chk-min', text: st.panelMin ? 'Open' : 'Minimize' });
-    panelEl = h('aside', { class: `chk-panel noprint${st.panelMin ? ' min' : ''}`, id: 'chk-panel', hidden: true },
-      h('div', { class: 'chk-head' }, h('strong', { text: 'Penilaian' }), h('span', { class: 'muted', id: 'chk-total' }), min), body);
-    min.addEventListener('click', () => { st.panelMin = !st.panelMin; panelEl.classList.toggle('min', st.panelMin); min.textContent = st.panelMin ? 'Open' : 'Minimize'; });
-    document.body.append(panelEl); chkRefresh();
-  }
-  function panelMinimize() { if (!panelEl) return; st.panelMin = true; panelEl.classList.add('min'); const b = panelEl.querySelector('#chk-min'); if (b) b.textContent = 'Open'; }
-  function panelSet(on) { if (panelEl) panelEl.hidden = !(on && st.assessOn); }
-  /** Stage between 3 and the results: finish ticking. */
-  /** Examiner's answer key, grouped by category and collapsed (same idea as the station groups). */
-  function answerKeyCard(c) {
-    const ai = (sec) => (c.ai && c.ai.includes(sec) ? h('span', { class: 'badge ai', text: 'Answers created by AI' }) : null);
-    const grp = (title, ...kids) => h('details', { class: 'chk-st key-grp' }, h('summary', {}, h('strong', { text: title })), h('div', { class: 'full' }, kids));
-    const tests = otherTests(c), pe = peOf(c);
-    const n = tests.filter((x) => st.opened.has(x.label)).length;
-    return h('section', { class: 'card', id: 'answer-key' }, h('h2', { text: 'Kunci jawaban (untuk penguji)' }),
-      h('p', { class: 'muted', text: 'Tertutup secara default; buka per kategori.' }),
-      grp('Skenario & anamnesis', scenario(c),
-        c.anamnesis.length ? c.anamnesis.map((x) => h('div', { class: 'qa' }, h('div', { class: 'q', text: x.q }), h('div', { text: x.a }))) : h('p', { class: 'muted', text: 'No anamnesis answers in the source.' })),
-      pe ? grp('Pemeriksaan fisik', (pe.quote || []).map((q) => h('p', { class: 'problem', text: q }))) : null,
-      grp(`Pemeriksaan penunjang (${n} dari ${tests.length} diminta di stage 2)`,
-        tests.length ? tests.map((x) => h('div', { class: 'tst' },
-          h('h4', {}, x.label, aiTest(x), h('span', { class: st.opened.has(x.label) ? 'badge acc' : 'badge no', text: st.opened.has(x.label) ? 'Diminta di stage 2' : 'Belum diminta' })),
-          resultBody(x, true))) : h('p', { class: 'muted', text: 'None.' })),
-      grp('Diagnosis', h('p', { text: c.diagnosis || '-' })),
-      c.differential && c.differential.length ? grp('Diagnosis banding', lines(c.differential)) : null,
-      grp('Prognosis', ai('prognosis'), h('p', { text: c.prognosis || '-' })),
-      c.treatment && c.treatment.length ? grp('Terapi', ai('treatment'), lines(c.treatment)) : null,
-      grp('Resep', ai('prescription'), c.prescription && c.prescription.length
-        ? [c.prescription.map((x) => h('pre', { class: 'rx', text: x })), c.rxFooter && h('pre', { class: 'rx foot', text: c.rxFooter }), c.rxNote && h('p', { class: 'muted', text: c.rxNote })]
-        : h('p', { text: '-' })),
-      c.education && c.education.length ? grp('Edukasi', ai('education'), lines(c.education)) : null);
-  }
-  function assessStage() {
-    stopClock();
-    mount(stage(3, 'Complete the assessment'),
-      answerKeyCard(cur()),
-      h('section', { class: 'card' }, h('h2', { text: 'Lengkapi penilaian' }),
-        h('p', { class: 'muted', text: `Tick anything you have not marked yet (the extra checklist at the bottom is not scored). The answer key above is for the examiner. Tests requested by the examinee in stage 2: ${[...st.opened].length} of ${otherTests(cur()).length}.` }),
-        checklistNode()),
-      h('div', { class: 'row' }, h('button', { class: 'btn primary', id: 'next4', text: 'Next: results →', on: { click: end } })));
-  }
-  /** Assessment results: scores per aspect and what was not done. */
-  function assessCard(e) {
-    if (!e || !e.assess || !FORMS[e.form]) return null;
-    const set = new Set(e.chk || []);
-    const r = compute(set, e.ovr, e.form);
-    return h('section', { class: 'card', id: 'assess-res' }, h('h2', { text: 'Assessment results' }),
-      h('p', { class: 'big', text: `${num1(r.earned)} / ${r.max}` }),
-      h('p', { class: r.pass ? 'pass' : 'fail', text: r.pass ? `Lulus (${r.passMark}–${r.max})` : `Tidak lulus (di bawah ${r.passMark})` }),
-      r.stations.map((x) => [
-        h('h3', { text: `${x.S.title} · ${num1(x.earned)} / ${x.max}` }),
-        h('div', { class: 'tbl-wrap' }, h('table', { class: 'lab' },
-          h('thead', {}, h('tr', {}, ['No', 'Aspek yang dinilai', 'Skor (1–4)', 'Bobot', 'Nilai'].map((t) => h('th', { text: t })))),
-          h('tbody', {}, x.aspects.map((y) => h('tr', {}, h('td', { text: String(y.a.no) }), h('td', { text: y.a.name }), h('td', { text: `${y.score}${y.manual ? ' (manual)' : ''}` }), h('td', { text: `${y.a.pct}%` }), h('td', { text: `${num1(y.earned)} / ${y.a.unit * 4}` })))))),
-        (() => { const miss = x.S.aspects.flatMap((a) => a.items.filter((i) => !set.has(i.id)).map((i) => [a, i]));
-          return miss.length ? [h('h4', { text: 'Belum dilakukan' }), h('ul', {}, miss.map(([a, i]) => h('li', {}, h('strong', { text: `${a.no}. ${a.name}: ` }), i.t)))] : h('p', { class: 'muted', text: 'Semua kriteria dilakukan.' }); })()]),
-      h('p', { class: 'muted', text: 'Skor tiap baris (1–4) dihitung dari butir yang dicentang menurut deskriptor Kertas Kerja Penilai OSCE UKMPPDH 2025, kecuali diubah manual. Nilai = bobot × skor, total 400, lulus ≥ 250.' }));
-  }
-
-  /** Extra checklist result: separate from the scored assessment. */
-  function extraCard(e) {
-    if (!e || !e.assess || !Array.isArray(e.xchk)) return null;
-    const set = new Set(e.xchk), miss = EXTRA.items.filter((i) => !set.has(i.id));
-    return h('section', { class: 'card', id: 'extra-res' }, h('h2', { text: EXTRA.title }),
-      h('p', { class: 'muted', text: `${set.size} of ${EXTRA.items.length} dilakukan. Tidak masuk skor penilaian.` }),
-      miss.length ? [h('h4', { text: 'Belum dilakukan' }), h('ul', {}, miss.map((i) => h('li', {}, h('strong', { text: `${i.g.name}: ` }), i.t)))] : h('p', { class: 'muted', text: 'Semua dilakukan.' }));
-  }
-
-  /* ---- participant reports (from History) ---- */
-  const nameKey = (n) => String(n).replace(/\s+/g, ' ').trim().toLowerCase();
-  function participants() {
-    const m = new Map();
-    for (const e of loadHist()) { if (!e.assess || e.form !== FORM_NOW) continue; const k = nameKey(e.name); if (!m.has(k)) m.set(k, { key: k, name: e.name, list: [] }); const p = m.get(k); p.name = e.name; p.list.push(e); }
-    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }
-  /** Small inline-SVG line chart (works on screen and in PDF). vals/labels: one point per session. */
-  function lineChart(vals, labels, o) {
-    const NS = 'http://www.w3.org/2000/svg', W = 640, H = 236, L = 46, R = 14, T = 26, B = 44;
-    const el = (n, a, t) => { const x = document.createElementNS(NS, n); for (const k in a) x.setAttribute(k, a[k]); if (t != null) x.textContent = t; return x; };
-    const top = Math.max(o.max || 0, ...vals, o.ref || 0, 1), px = (i) => (vals.length === 1 ? L + (W - L - R) / 2 : L + (i * (W - L - R)) / (vals.length - 1)), py = (v) => T + (H - T - B) * (1 - v / top);
-    const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.title, class: 'chart-svg' });
-    for (let g = 0; g <= 4; g++) { const v = (top * g) / 4, y = py(v); svg.append(el('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: 'currentColor', 'stroke-opacity': '.15' }), el('text', { x: L - 6, y: y + 4, 'text-anchor': 'end', 'font-size': '11', fill: 'currentColor' }, String(Math.round(v)))); }
-    if (o.ref) svg.append(el('line', { x1: L, x2: W - R, y1: py(o.ref), y2: py(o.ref), stroke: '#16a34a', 'stroke-width': '1.5', 'stroke-dasharray': '5 4' }), el('text', { x: W - R, y: py(o.ref) - 4, 'text-anchor': 'end', 'font-size': '11', fill: '#16a34a' }, o.refLabel));
-    svg.append(el('polyline', { points: vals.map((v, i) => `${px(i)},${py(v)}`).join(' '), fill: 'none', stroke: o.color, 'stroke-width': '2.5' }));
-    const every = Math.ceil(vals.length / 8);
-    vals.forEach((v, i) => { svg.append(el('circle', { cx: px(i), cy: py(v), r: 4, fill: o.color }), el('text', { x: px(i), y: py(v) - 8, 'text-anchor': 'middle', 'font-size': '11', fill: 'currentColor' }, num1(v)));
-      if (i % every === 0 || i === vals.length - 1) svg.append(el('text', { x: px(i), y: H - 24, 'text-anchor': 'middle', 'font-size': '10', fill: 'currentColor' }, `#${i + 1}`), el('text', { x: px(i), y: H - 11, 'text-anchor': 'middle', 'font-size': '9', fill: 'currentColor', 'fill-opacity': '.7' }, labels[i])); });
-    return h('div', { class: 'chart' }, svg);
-  }
-  function reportNodes(p) {
-    const n = p.list.length;
-    const rs = p.list.map((e) => ({ e, r: compute(new Set(e.chk || []), e.ovr) }));
-    const avg = (f) => rs.reduce((t, x) => t + f(x.r), 0) / n;
-    const missed = ALL_ITEMS.map((it) => ({ it, k: p.list.filter((e) => !(e.chk || []).includes(it.id)).length })).filter((x) => x.k > 0).sort((a, b) => b.k - a.k);
-    const aspAvg = ASSESS.flatMap((S) => S.aspects).map((a) => ({ a, v: rs.reduce((t, x) => t + x.r.stations.flatMap((y) => y.aspects).find((y) => y.a === a).score, 0) / n }));
+    const field = (label, id, control) => h('div', {}, h('label', { for: id, text: label }), control);
     return [
-      h('section', { class: 'card' }, h('h2', { text: `Evaluation report: ${p.name}` }),
-        h('p', { class: 'muted', text: `${n} session${n === 1 ? '' : 's'} with the assessment form · average total ${num1(avg((r) => r.earned))} / ${MAXS} · passed ${rs.filter((x) => x.r.pass).length} of ${n}` }),
-        h('h3', { text: 'Score over time' }),
-        lineChart(rs.map((x) => x.r.earned), p.list.map((e) => new Date(e.t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })), { title: 'Total score per session', max: MAXS, ref: PASS, refLabel: `Pass ${PASS}`, color: '#2563eb' }),
-        h('h3', { text: 'Missed items over time' }),
-        lineChart(p.list.map((e) => ALL_ITEMS.filter((it) => !(e.chk || []).includes(it.id)).length), p.list.map((e) => new Date(e.t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })), { title: 'Checklist items missed per session', max: 0, color: '#dc2626' }),
-        h('h3', { text: 'Sessions' }),
-        h('div', { class: 'tbl-wrap' }, h('table', { class: 'lab' },
-          h('thead', {}, h('tr', {}, ['Date', 'Case', ...ASSESS.map((S) => S.id), 'Total', 'Status'].map((t) => h('th', { text: t })))),
-          h('tbody', {}, rs.map(({ e, r }) => { const c = st.byId.get(e.id); return h('tr', {}, h('td', { text: when(e.t) }), h('td', { text: c ? `No. ${numOf(c)}` : '-' }), ...r.stations.map((x) => h('td', { text: `${num1(x.earned)}/${x.max}` })), h('td', { text: num1(r.earned) }), h('td', { text: r.pass ? 'Lulus' : 'Tidak lulus' })); })))),
-        h('h3', { text: 'Average score per row (1–4)' }),
-        h('ul', {}, aspAvg.map((x) => h('li', { text: `${x.a.no}. ${x.a.name}: ${num1(x.v)}` }))),
-        h('h3', { text: 'Most often missed' }),
-        missed.length ? h('ol', {}, missed.slice(0, 15).map((x) => h('li', {}, h('strong', { text: `${x.it.a.no}. ${x.it.a.name}: ` }), `${x.it.t} `, h('span', { class: 'muted', text: `(missed in ${x.k} of ${n} · ${Math.round((100 * x.k) / n)}%)` })))) : h('p', { class: 'muted', text: 'Nothing was missed.' }),
-        (() => { const xs = p.list.filter((e) => Array.isArray(e.xchk)); if (!xs.length) return null;
-          const xm = EXTRA.items.map((it) => ({ it, k: xs.filter((e) => !e.xchk.includes(it.id)).length })).filter((x) => x.k > 0).sort((a, b) => b.k - a.k);
-          return [h('h3', { text: `${EXTRA.title}: paling sering terlewat` }),
-            xm.length ? h('ol', {}, xm.map((x) => h('li', {}, h('strong', { text: `${x.it.g.name}: ` }), `${x.it.t} `, h('span', { class: 'muted', text: `(terlewat ${x.k} dari ${xs.length})` })))) : h('p', { class: 'muted', text: 'Semua dilakukan.' })]; })()),
+      backButton(),
+      h('section', { class: 'card' },
+        h('h2', { text: 'All questions' }),
+        h('div', { class: 'filters' },
+          field('Status', 'b-status', status),
+          field('Search', 'b-query', query)
+        ),
+        catGroup.node,
+        srcGroup.node,
+        tjGroup.node,
+        h('label', { class: 'inline-check', for: 'b-reveal' }, revealBox, 'Show correct answers and explanations'),
+        count,
+        note
+      ),
+      list,
     ];
   }
-  function reports() {
-    stopClock();
-    const ps = participants();
-    mount(h('div', { class: 'row' }, h('button', { class: 'btn', id: 'back', text: '← Back to history', on: { click: history } })),
-      h('section', { class: 'card' }, h('h2', { text: 'Participant reports' }),
-        ps.length ? [h('p', { class: 'muted', text: 'Participants are grouped by name (spelling and capitals are ignored). Only sessions that used the assessment form count.' }),
-          h('div', { class: 'row' }, h('button', { class: 'btn primary', id: 'rep-all', text: 'Save all reports as PDF', on: { click: () => printBlocks(ps.map(reportNodes)) } })),
-          ps.map((p) => h('div', { class: 'li hist-item' }, h('div', {}, h('strong', { text: p.name }), h('div', { class: 'muted', text: `${p.list.length} session${p.list.length === 1 ? '' : 's'}` })),
-            h('div', { class: 'row' }, h('button', { class: 'btn', text: 'View', on: { click: () => reportView(p) } }), h('button', { class: 'btn', text: 'Save PDF', on: { click: () => printBlocks([reportNodes(p)]) } }))))]
-          : h('p', { class: 'muted', text: 'No sessions with the assessment form yet.' })));
-  }
-  function reportView(p) {
-    mount(h('div', { class: 'row noprint' }, h('button', { class: 'btn', id: 'back', text: '← Back', on: { click: reports } }), h('button', { class: 'btn primary', id: 'pdf', text: 'Save as PDF', on: { click: doPrint } })), reportNodes(p));
+
+  /* ---- print / save as PDF ---- */
+  function printSheet(qs, opts) {
+    const who = state.user ? state.user.name : '';
+    const tabName = (TABS.find(([id]) => id === state.tab) || [])[1] || '';
+    const item = (q, n) => h('li', { class: 'p-item' },
+      h('p', { class: 'p-head', text: `${n}. ${labelOf(q)}` }),
+      stemNodes(q),
+      h('ol', { class: 'p-options', type: 'A' }, q.options.map((text, i) => h('li', {}, h('span', { text }), optionImage(q, i)))),
+      opts.key && h('p', { class: 'p-key' }, h('b', { text: 'Answer: ' }), `${letter(q.correctIndex)}. ${q.options[q.correctIndex]}`),
+      opts.key && q.aiGenerated && h('p', { class: 'p-note', text: 'AI-generated answer: verify before relying on it.' }),
+      opts.expl && (q.explanation || (q.explanationImages && q.explanationImages.length)) && h('div', { class: 'p-expl' },
+        h('b', { text: 'Explanation: ' }), q.explanation && h('span', { text: q.explanation }), imageNodes(q.explanationImages, 'Explanation image')));
+    return h('div', { id: 'print-root' },
+      h('h1', { text: `Quiz Time: ${tabName}` }),
+      h('p', { class: 'p-meta', text: `${qs.length} question(s)${who ? ` · ${who}` : ''} · ${new Date().toLocaleDateString()}${opts.key ? ' · with answer key' : ' · without answer key'}${opts.expl ? ' and explanations' : ''}` }),
+      h('ol', { class: 'p-list' }, qs.map((q, i) => item(q, i + 1))));
   }
 
-  /* ---- 4. answer key (also used by History and printing) ---- */
-  /** Everything inside the answer-key card. `ids` adds element ids (only one answer key may be on a page with ids). */
-  function keyBody(c, ids) {
-    const id = (x) => (ids ? x : null);
-    const ai = (sec) => (c.ai && c.ai.includes(sec) ? h('span', { class: 'badge ai', text: 'Answers created by AI' }) : null);
-    return [
-      h('h3', { text: 'Diagnosis' }), h('p', { id: id('key-dx'), text: c.diagnosis || '-' }),
-      c.differential && c.differential.length ? [h('h3', { text: 'Differential diagnosis' }), h('div', { id: id('key-ddx') }, lines(c.differential))] : null,
-      h('h3', {}, 'Prognosis', ai('prognosis')), h('p', { id: id('key-px'), text: c.prognosis || '-' }),
-      c.treatment && c.treatment.length ? [h('h3', {}, 'Treatment', ai('treatment')), h('div', { id: id('key-tx') }, lines(c.treatment))] : null,
-      h('h3', {}, 'Prescription', ai('prescription')),
-      c.prescription && c.prescription.length
-        ? [h('div', { id: id('key-rx'), class: 'rx-list' }, c.prescription.map((x) => h('pre', { class: 'rx', text: x }))),
-          c.rxFooter && h('pre', { class: 'rx foot', text: c.rxFooter }),
-          c.rxNote && h('p', { class: 'muted', text: c.rxNote })]
-        : h('p', { id: id('key-rx'), text: '-' }),
-      c.education && c.education.length ? [h('h3', {}, 'Education', ai('education')), h('div', { id: id('key-edu') }, lines(c.education))] : null,
-      c.refs && c.refs.length ? [h('h3', { text: 'References (from source)' }), h('ul', { class: 'muted' }, c.refs.map((r) => h('li', { text: r })))] : null,
-    ];
-  }
-  const finishedCard = (c, e) => h('section', { class: 'card' }, h('h2', { text: 'Examination finished' }),
-    h('p', { class: 'muted', text: `No. ${numOf(c)} · [${c.source}] ${c.title}` }),
-    e && h('p', { class: 'muted', text: `Participant: ${e.name} · ${when(e.t)} · Timers ${e.timer ? 'on' : 'off'}` }));
-  /** Stage 4 / History: the same full view as All questions, plus accessed / not accessed marks on every test. */
-  const resultsCard = (c, e, ids) => h('section', { class: 'card', id: ids ? 'key' : null }, fullCase(c, { opened: new Set((e && e.opened) || []), ids }));
-  const doPrint = () => { try { window.print(); } catch (_) { /* printing is optional */ } };
-  const missing = (e) => h('section', { class: 'card' }, h('h2', { text: 'Case no longer available' }), h('p', { class: 'muted', text: `${e.name} · ${when(e.t)}` }));
-
-  function end() {
-    stopClock();
-    const c = cur();
-    if (!st.entry) {
-      st.entry = { t: Date.now(), id: c.id, name: st.name, timer: st.timerOn, opened: [...st.opened] };
-      if (st.assessOn) { st.entry.assess = true; st.entry.form = FORM_NOW; st.entry.chk = [...st.chk]; st.entry.xchk = [...st.xchk]; st.entry.ovr = { ...st.ovr }; }
-      const a = loadHist(); a.push(st.entry); saveHist(a);
-    }
-    mount(stage(stageTotal(), 'Examination results'), finishedCard(c, st.entry), assessCard(st.entry), extraCard(st.entry), resultsCard(c, st.entry, true),
-      caseReportControl(c),
-      h('div', { class: 'row noprint' },
-        h('button', { class: 'btn primary', id: 'again', text: 'New case', on: { click: home } }),
-        h('button', { class: 'btn', id: 'pdf', text: 'Save as PDF', on: { click: doPrint } }),
-        h('button', { class: 'btn', id: 'to-hist', text: 'History', on: { click: () => history() } })));
+  function doPrint(qs, opts) {
+    const old = document.getElementById('print-root');
+    if (old) old.remove();
+    const root = printSheet(qs, opts);
+    document.body.append(root);
+    document.body.classList.add('printing');
+    const cleanup = () => { document.body.classList.remove('printing'); root.remove(); window.removeEventListener('afterprint', cleanup); };
+    window.addEventListener('afterprint', cleanup);
+    const imgs = [...root.querySelectorAll('img')];
+    imgs.forEach((im) => { im.loading = 'eager'; });
+    Promise.all(imgs.map((im) => (im.decode ? im.decode().catch(() => null) : null))).then(() => setTimeout(() => window.print(), 50));
   }
 
-  /* ---- case reports: report a case, and the public Reports page with thumbs up/down and comments (Google Sheet through the same Apps Script) ---- */
-  const CASE_TYPES = ['Incorrect scenario / physical exam', 'Incorrect anamnesis', 'Incorrect test results', 'Incorrect diagnosis', 'Incorrect treatment / prescription', 'Incorrect answer key / explanation', 'Other'];
-  const reportedCases = new Set();
-  const userLabel = () => (st.user ? `${st.user.name}${st.user.university ? ` (${st.user.university})` : ''}` : 'Unknown');
-  const postJson = (body) => (REGISTRY_URL ? registry.call(REGISTRY_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, app: 'osce' }) }) : null);
-  /** Self-contained Report button + form for one case (Browse and the end of a session). Does not re-render the page. */
-  function caseReportControl(c) {
-    const wrap = h('div', { class: 'item-report noprint' });
-    const types = new Set(); let comment = ''; let open = false; let sending = false; let msg = null;
-    const paintR = (focus) => {
-      const kids = [h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', 'data-report': c.id, 'aria-expanded': open ? 'true' : 'false', text: reportedCases.has(c.id) ? 'Reported ✓' : 'Report this case',
-        on: { click: () => { open = !open; msg = null; paintR(open ? 'input' : 'button'); } } }))];
-      if (reportedCases.has(c.id) && !open) kids.push(h('p', { class: 'muted', text: 'Thanks, your report was sent.' }));
-      if (open) kids.push(h('div', { class: 'report-box' },
-        h('h3', { text: 'Report this case' }), h('p', { class: 'muted', text: 'What looks wrong? Select everything that applies.' }),
-        CASE_TYPES.map((t) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', 'data-type': t, checked: types.has(t), on: { change: (e) => { if (e.target.checked) types.add(t); else types.delete(t); } } }), h('span', { text: ` ${t}` }))),
-        h('label', { text: 'Additional comments (optional)' }),
-        h('textarea', { maxlength: '1000', placeholder: 'For example: the diagnosis should be … because …', value: comment, on: { input: (e) => { comment = e.target.value; } } }),
-        msg && h('div', { class: `notice ${msg.type}`, role: 'alert' }, h('p', { text: msg.text })),
-        h('div', { class: 'row' },
-          h('button', { class: 'btn primary', type: 'button', 'data-send': c.id, text: sending ? 'Sending…' : 'Send report', disabled: sending, on: { click: async () => {
-            if (sending) return;
-            const fail = (text) => { msg = { type: 'err', text }; paintR('send'); };
-            if (!types.size) return fail('Select at least one type of error.');
-            if (types.size === 1 && types.has('Other') && !comment.trim()) return fail('Please describe the problem in the comment box.');
-            if (!REGISTRY_URL) return fail('Reporting is not available: this site is not connected to the report sheet.');
-            sending = true; msg = { type: 'ok', text: 'Sending…' }; paintR('send');
-            const res = await postJson({ action: 'report', reporter: userLabel(), code: c.id, device: st.user ? st.user.id : '', caseNo: numOf(c), source: c.source, title: c.title, types: [...types], comment: comment.trim().slice(0, 1000) });
-            sending = false;
-            if (res) { reportedCases.add(c.id); types.clear(); comment = ''; open = false; msg = null; paintR('button'); } else fail('Could not send the report. Check your connection and try again.');
-          } } }),
-          h('button', { class: 'btn', type: 'button', text: 'Cancel', on: { click: () => { open = false; msg = null; paintR('button'); } } }))));
-      wrap.replaceChildren(...kids);
-      const el = focus === 'input' ? wrap.querySelector('input') : focus === 'send' ? wrap.querySelector('[data-send]') : focus === 'button' ? wrap.querySelector('[data-report]') : null;
-      if (el) el.focus();
+  const post = (body) => registry.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+  function voteRow(r, paint, st, pre = 'rp') {
+    const cast = async (v) => {
+      if (!state.user || r.busy) return;
+      const prev = r.mine || 0; const next = prev === v ? 0 : v;
+      r.busy = true;
+      const res = await post({ action: 'rvote', id: r.id, device: state.user.id, vote: next });
+      r.busy = false;
+      if (!res) { st.msg = 'Could not save your vote. Try again.'; paint(); return; }
+      if (prev > 0) r.up = Math.max(0, (r.up || 0) - 1); if (prev < 0) r.down = Math.max(0, (r.down || 0) - 1);
+      if (next > 0) r.up = (r.up || 0) + 1; if (next < 0) r.down = (r.down || 0) + 1;
+      r.mine = next; st.msg = ''; paint();
     };
-    paintR();
-    return wrap;
+    const btn = (v, label, n, id) => h('button', { class: `btn${(r.mine || 0) === v ? ' primary' : ''}`, type: 'button', id, 'aria-pressed': String((r.mine || 0) === v), text: `${label} ${n || 0}`, on: { click: () => cast(v) } });
+    return h('div', { class: 'row' }, btn(1, '👍', r.up, `${pre}-up`), btn(-1, '👎', r.down, `${pre}-down`));
   }
-
-  /* ---- shared admin edits (stored ENCRYPTED in the sheet), admin flag and edit history ---- */
-  const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '', busy: false, loaded: false };
-  let adminFlag = false; let editingOpen = false;
-  const isAdmin = () => adminFlag;
-  async function sealJson(obj) {
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, st.key, enc.encode(JSON.stringify(obj)));
-    return `e1:${b64e(iv)}.${b64e(new Uint8Array(ct))}`;
+  /** A reply starts with @[Name (University)] followed by the text. */
+  function replyOf(text) {
+    const m = /^@\[([^\]]{2,140}(?:\([^)]*\))?)\]\s?/.exec(text || '');
+    return m ? { to: m[1], text: (text || '').slice(m[0].length) } : { to: '', text: text || '' };
   }
-  async function openJson(p) {
-    try {
-      const [iv, ct] = String(p).slice(3).split('.');
-      return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, st.key, b64d(ct))));
-    } catch (_) { return null; }
-  }
-  const strs = (a) => Array.isArray(a) && a.every((x) => typeof x === 'string');
-  /** The editable text of a case (what the admin editor shows and saves). */
-  function caseSnap(c) {
-    const quotes = {};
-    c.tests.forEach((t) => { if (strs(t.quote)) quotes[t.label] = t.quote.slice(); });
-    return { title: c.title || '', briefText: (c.brief && c.brief.text) || '', diagnosis: c.diagnosis || '', differential: (c.differential || []).slice(), prognosis: c.prognosis || '',
-      treatment: (c.treatment || []).slice(), prescription: (c.prescription || []).slice(), rxFooter: c.rxFooter || '', rxNote: c.rxNote || '', education: (c.education || []).slice(),
-      anamnesis: c.anamnesis.map((x) => ({ q: x.q || '', a: x.a || '' })), quotes };
-  }
-  function remoteOf(c) {
-    const e = remote.cur.get(c.id);
-    if (!e || typeof e.title !== 'string' || !e.title.trim() || typeof e.briefText !== 'string' || !e.briefText.trim() || !Array.isArray(e.anamnesis) || e.anamnesis.length !== c.anamnesis.length
-      || !['differential', 'treatment', 'prescription', 'education'].every((k) => strs(e[k])) || !['diagnosis', 'prognosis', 'rxFooter', 'rxNote'].every((k) => typeof e[k] === 'string')) return c;
-    const q = e.quotes && typeof e.quotes === 'object' ? e.quotes : {};
-    return { ...c, title: e.title, brief: { ...c.brief, text: e.briefText }, diagnosis: e.diagnosis, differential: e.differential, prognosis: e.prognosis, treatment: e.treatment,
-      prescription: e.prescription, rxFooter: e.rxFooter || undefined, rxNote: e.rxNote || undefined, education: e.education,
-      anamnesis: c.anamnesis.map((x, i) => ({ ...x, q: String(e.anamnesis[i].q), a: String(e.anamnesis[i].a) })),
-      tests: c.tests.map((t) => (strs(t.quote) && strs(q[t.label]) ? { ...t, quote: q[t.label].slice() } : t)), remoteEdit: { rev: e.rev, by: e.by, t: e.t } };
-  }
-  function rebuildCases() {
-    if (!st.baseCases || !st.cases || !st.byId) return;
-    const next = st.baseCases.map(remoteOf);
-    st.cases.length = 0; st.cases.push(...next);
-    st.byId.clear(); next.forEach((c) => st.byId.set(c.id, c));
-  }
-  async function loadRemote(quiet) {
-    if (!REGISTRY_URL || !st.user || !st.key) return false;
-    const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}action=boot&app=osce&device=${encodeURIComponent(st.user.id)}`, { method: 'GET' });
-    if (!d) return false;
-    const rows = (Array.isArray(d.edits) ? d.edits : []).filter((r) => r && typeof r.item === 'string' && Number.isInteger(r.rev) && typeof r.p === 'string')
-      .sort((x, y) => (x.item < y.item ? -1 : x.item > y.item ? 1 : x.rev - y.rev));
-    const sig = `${d.admin ? 1 : 0}:${rows.length}:${rows.reduce((m, r) => Math.max(m, r.t || 0), 0)}`;
-    remote.loaded = true;
-    if (sig === remote.sig && !quiet) return true;
-    const bodies = await Promise.all(rows.map((r) => openJson(r.p)));
-    const cur = new Map(); const rev = new Map(); const hist = new Map();
-    rows.forEach((r, i) => {
-      const b = bodies[i];
-      rev.set(r.item, Math.max(rev.get(r.item) || 0, r.rev));
-      if (!hist.has(r.item)) hist.set(r.item, []);
-      hist.get(r.item).push({ rev: r.rev, by: r.by, t: r.t, kind: r.kind, note: b && b.note, before: b && b.before, set: b && b.set });
-      if (r.kind === 'revert') cur.delete(r.item); else if (b && b.set) cur.set(r.item, { ...b.set, rev: r.rev, by: r.by, t: r.t });
-    });
-    const wasAdmin = adminFlag; adminFlag = d.admin === true;
-    Object.assign(remote, { cur, rev, hist, sig });
-    if (st.baseCases) rebuildCases();
-    if (wasAdmin !== adminFlag && !editingOpen) {
-      const tab = document.querySelector('#home-tabs .tab.active');
-      if (tab && tab.id === 'tab-reports') caseReportsView(); else if (tab && tab.id === 'tab-all' && document.getElementById('source')) home();
-    }
-    return true;
-  }
-  function kickRemote() {
-    if (remote.busy || remote.loaded) return;
-    remote.busy = true; loadRemote(false).catch(() => {}).finally(() => { remote.busy = false; });
-  }
-  const adminPost = (body) => postJson({ ...body, device: st.user.id, editor: userLabel() });
-
-  const FIELD_LABEL = { title: 'Title', briefText: 'Scenario', diagnosis: 'Diagnosis', differential: 'Differential diagnosis', prognosis: 'Prognosis', treatment: 'Treatment', prescription: 'Prescription', rxFooter: 'Prescription footer', rxNote: 'Prescription note', education: 'Education' };
-  /** Edit history of one case (visible to everyone). */
-  function editInfo(c) {
-    const hs = remote.hist.get(c.id);
-    if (!hs || !hs.length) return null;
-    const clip = (t) => { t = Array.isArray(t) ? t.join(' / ') : String(t == null ? '' : t); return t.length > 300 ? `${t.slice(0, 300)}…` : t; };
-    const change = (label, a, b) => h('p', { class: 'prewrap' }, h('strong', { text: `${label}: ` }), h('s', { class: 'muted', text: clip(a) }), ' → ', clip(b));
-    const lines = (e) => {
-      const b = e.before; const n = e.set; if (!b || !n) return [];
-      const out = [];
-      Object.keys(FIELD_LABEL).forEach((k) => { if (JSON.stringify(b[k]) !== JSON.stringify(n[k])) out.push(change(FIELD_LABEL[k], b[k], n[k])); });
-      (n.anamnesis || []).forEach((x, i) => { const y = (b.anamnesis || [])[i] || {}; if (y.q !== x.q) out.push(change(`Anamnesis ${i + 1} question`, y.q, x.q)); if (y.a !== x.a) out.push(change(`Anamnesis ${i + 1} answer`, y.a, x.a)); });
-      Object.keys(n.quotes || {}).forEach((k) => { if (JSON.stringify((b.quotes || {})[k]) !== JSON.stringify(n.quotes[k])) out.push(change(k, (b.quotes || {})[k], n.quotes[k])); });
-      return out;
+  function commentBox(r, st, paint, pre = 'rp') {
+    const ta = h('textarea', { id: `${pre}-ctext`, rows: '3', maxlength: '800', placeholder: 'Write a comment…',
+      on: { input: (ev) => { st.draft = ev.target.value; } } });
+    ta.value = st.draft || '';
+    const send = async () => {
+      const body = (st.draft || '').trim();
+      if (body.length < 2 || !state.user || st.sending) return;
+      const text = st.replyTo ? `@[${st.replyTo}] ${body}` : body;
+      st.sending = true;
+      const name = `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}`;
+      const res = await post({ action: 'rcomment', id: r.id, name, text });
+      st.sending = false;
+      if (!res) { st.msg = 'Could not send the comment. Try again.'; paint(); return; }
+      (r.comments || (r.comments = [])).push({ t: Date.now(), name, text });
+      st.draft = ''; st.msg = ''; st.replyTo = ''; paint();
     };
-    return h('details', { class: 'edit-history' }, h('summary', { text: `✎ Edited by admin · history (${hs.length})` }),
-      h('div', {}, hs.slice().sort((x, y) => y.rev - x.rev).map((e) => h('div', { class: 'qa' },
-        h('div', {}, h('strong', { text: e.kind === 'revert' ? 'Reverted to the original version' : `Edit #${e.rev}` }), h('span', { class: 'muted', text: ` · ${e.by} · ${e.t ? new Date(e.t).toLocaleString() : ''}` })),
-        e.note && h('p', { class: 'muted', text: `Reason: ${e.note}` }), lines(e)))));
+    const me = myLabel();
+    return h('div', { id: `${pre}-comments` },
+      h('h3', { text: `Comments (${(r.comments || []).length})` }),
+      h('ul', { class: 'hist-list' }, (r.comments || []).length
+        ? r.comments.map((c) => { const rp = replyOf(c.text); return h('li', { class: 'hist-item cm' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
+          h('p', { class: 'prewrap' }, rp.to && h('span', { class: `mention${rp.to === me ? ' me' : ''}`, text: `@${rp.to}` }), rp.to && ' ', rp.text),
+          c.hidden && h('p', { class: 'muted', text: '(hidden from users)' }),
+          isAdmin() && c.cid && h('button', { class: 'btn reply-btn', type: 'button', text: c.hidden ? 'Unhide' : 'Hide', on: { click: async () => { const res = await adminPost({ action: 'ahide', app: 'quiz', id: r.id, cid: c.cid, hide: !c.hidden }); if (res) { c.hidden = !c.hidden; paint(); } } } }),
+          c.name !== me && h('button', { class: 'btn reply-btn', type: 'button', text: '↩ Reply', on: { click: () => { st.replyTo = c.name; paint(); const t = document.getElementById(`${pre}-ctext`); if (t) t.focus(); } } })); })
+        : [h('li', { class: 'muted', text: 'No comments yet.' })]),
+      st.msg && h('p', { class: 'notice err', role: 'alert', text: st.msg }),
+      st.replyTo && h('p', { class: 'muted reply-to' }, `Replying to ${st.replyTo} `, h('button', { class: 'btn', type: 'button', text: '✕', 'aria-label': 'Cancel reply', on: { click: () => { st.replyTo = ''; paint(); } } })),
+      ta, h('div', { class: 'form-actions' }, h('button', { class: 'btn primary', type: 'button', id: `${pre}-csend`, text: 'Send comment', on: { click: send } })));
   }
-  /** Button in Browse that opens the editor for one case. */
-  function adminCaseControl(c, repaint) {
-    const host = h('div', { class: 'noprint' });
-    const btn = h('button', { class: 'btn', type: 'button', 'data-edit': c.id, text: '✎ Edit case (admin)', on: { click: () => { btn.hidden = true; host.append(adminEditor(c, (changed) => { if (changed) repaint(); else { host.lastChild.remove(); btn.hidden = false; } })); } } });
-    host.append(btn);
-    return host;
+  let reportsCache = null; // { list } | { error } | { loading }
+
+  /* ---- notifications for my own reports: other people's thumbs up/down and comments since I last opened the Reports tab ---- */
+  const myLabel = () => (state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : '');
+  /** Mine = the report's device ID matches this device; reports without a stored device ID fall back to name + university. */
+  const isMine = (r, me) => (r.dev ? r.own : r.by === me);
+  const seenMap = () => { const m = storage.read(KEYS.repseen, {}); return m && typeof m === 'object' ? m : {}; };
+  const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)),
+    c: (r.comments || []).filter((c) => c.name !== myLabel()).length,
+    m: (r.comments || []).filter((c) => c.name !== myLabel() && replyOf(c.text).to === myLabel()).length });
+  /** New activity on each of my reports: { [id]: { up, down, c } } with only positive differences. */
+  function freshActivity() {
+    const out = {};
+    if (!reportsCache || !reportsCache.list || !state.user) return out;
+    const seen = seenMap(); const me = myLabel();
+    for (const r of reportsCache.list) {
+      if (!isMine(r, me)) continue;
+      const o = othersOf(r); const s = seen[r.id] || { up: 0, down: 0, c: 0, m: 0 };
+      const d = { up: Math.max(0, o.up - s.up), down: Math.max(0, o.down - s.down), c: Math.max(0, o.c - s.c), m: 0 };
+      if (d.c) d.items = (r.comments || []).filter((c) => c.name !== me).slice(-d.c);
+      if (d.up || d.down || d.c) { d.code = r.code; d.mine = true; out[r.id] = d; }
+    }
+    for (const r of reportsCache.list) {
+      if (isMine(r, me)) continue;
+      const o = othersOf(r); const s = seen[r.id] || { m: 0 };
+      const m = Math.max(0, o.m - (s.m || 0));
+      if (m) { const ms = (r.comments || []).filter((c) => c.name !== me && replyOf(c.text).to === me).slice(-m); out[r.id] = { up: 0, down: 0, c: 0, m, items: ms, code: r.code, mine: false }; }
+    }
+    return out;
   }
-  /** Admin editor for one case: scenario, anamnesis, test text, diagnosis, treatment, prescription... Saved for everyone. */
-  function adminEditor(c, done) {
-    editingOpen = true;
-    const close = (changed) => { editingOpen = false; done(changed); };
-    const area = (id, v, rows) => { const t = h('textarea', { id, rows: String(rows), maxlength: '6000' }); t.value = v; return t; };
-    const before = caseSnap(c);
-    const ctl = {};
-    const spec = [['title', 'line'], ['briefText', 'text'], ['diagnosis', 'text'], ['differential', 'lines'], ['prognosis', 'text'], ['treatment', 'lines'], ['prescription', 'blocks'], ['rxFooter', 'text'], ['rxNote', 'text'], ['education', 'lines']];
-    const toStr = (k, v) => (k === 'blocks' ? v.join('\n---\n') : Array.isArray(v) ? v.join('\n') : v);
-    const fields = spec.map(([k, kind]) => {
-      let el;
-      if (kind === 'line') { el = h('input', { type: 'text', id: `ae-${k}`, maxlength: '300' }); el.value = before[k]; }
-      else el = area(`ae-${k}`, kind === 'blocks' ? before[k].join('\n---\n') : Array.isArray(before[k]) ? before[k].join('\n') : before[k], kind === 'text' ? 4 : 5);
-      ctl[k] = { el, kind };
-      const hint = kind === 'lines' ? ' (one per line)' : kind === 'blocks' ? ' (separate items with a line containing only ---)' : '';
-      return h('div', {}, h('label', { for: `ae-${k}`, text: `${FIELD_LABEL[k]}${hint}` }), el);
-    });
-    const anam = before.anamnesis.map((x, i) => { const q = area(`ae-aq${i}`, x.q, 2); const a = area(`ae-aa${i}`, x.a, 3); return { q, a, node: h('div', { class: 'qa' }, h('label', { for: `ae-aq${i}`, text: `${i + 1}. Question` }), q, h('label', { for: `ae-aa${i}`, text: 'Expected answer' }), a) }; });
-    const qkeys = Object.keys(before.quotes);
-    const quotes = qkeys.map((k, i) => { const t = area(`ae-t${i}`, before.quotes[k].join('\n'), 4); return { k, t, node: h('div', {}, h('label', { for: `ae-t${i}`, text: `${k} (one line per paragraph)` }), t) }; });
-    const note = h('input', { type: 'text', id: 'ae-note', maxlength: '200', placeholder: 'Reason (optional, shown in the edit history)' });
-    const msg = h('p', { class: 'notice', role: 'alert', hidden: true });
-    const show = (t) => { msg.hidden = false; msg.className = 'notice err'; msg.textContent = t; };
-    const lines = (v) => v.split('\n').map((x) => x.trim()).filter(Boolean);
-    const send = async (kind) => {
-      let set = null;
-      if (kind === 'edit') {
-        set = {};
-        for (const [k, kd] of spec) {
-          const v = ctl[k].el.value;
-          set[k] = kd === 'lines' ? lines(v) : kd === 'blocks' ? v.split(/\n-{3,}\n/).map((x) => x.trim()).filter(Boolean) : v.trim();
-        }
-        set.anamnesis = anam.map((x) => ({ q: x.q.value.trim(), a: x.a.value.trim() }));
-        set.quotes = {}; quotes.forEach((x) => { set.quotes[x.k] = lines(x.t.value); });
-        if (!set.title || !set.briefText) { show('The title and the scenario need text.'); return; }
-        if (JSON.stringify(set) === JSON.stringify(before)) { show('Nothing changed.'); return; }
+  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m, 0);
+  function markSeen(onlyId) {
+    if (!reportsCache || !reportsCache.list) return;
+    const seen = seenMap(); const me = myLabel();
+    for (const r of reportsCache.list) { const o = othersOf(r); if ((isMine(r, me) || o.m) && (!onlyId || r.id === onlyId)) seen[r.id] = o; }
+    storage.write(KEYS.repseen, seen);
+    renderBell();
+  }
+  let freshShown = {}; // activity highlighted during this visit to the Reports tab
+  let prefetched = false;
+  async function prefetchReports() {
+    if (prefetched || !REGISTRY_URL || !state.user) return;
+    prefetched = true;
+    renderBell();
+    if (!reportsCache) { const list = await registry.reports(); reportsCache = list ? { list } : null; }
+    renderBell();
+    if (freshCount() && state.machine === 'SETUP' && state.tab !== 'reports') render();
+    setInterval(async () => {
+      if (document.hidden) return;
+      const list = await registry.reports();
+      if (list && state.tab !== 'reports') { reportsCache = { list }; renderBell(); }
+      else if (!list) renderBell();
+      if (state.machine === 'SETUP' && !editingOpen) loadRemote(false).catch(() => {});
+    }, 90000);
+  }
+  /* ---- bell (top right): list of new thumbs up/down and comments on my reports; a click opens that thread ---- */
+  let bellEl = null; let bellOpen = false; let pendingScroll = null; let pinnedFresh = {};
+  function renderBell() {
+    if (!REGISTRY_URL || !state.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
+    if (!bellEl) { bellEl = h('div', { class: 'bell', id: 'bell' }); document.body.append(bellEl); }
+    const fa = freshActivity(); const ids = Object.keys(fa);
+    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m, 0);
+    const kids = [h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
+      on: { click: () => { bellOpen = !bellOpen; renderBell(); } } })];
+    if (bellOpen) {
+      kids.push(h('div', { class: 'bell-panel card', id: 'bell-panel' },
+        h('div', { class: 'row between' }, h('strong', { text: 'Notifications' }),
+          ids.length && h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { markSeen(); } } })),
+        ids.length ? ids.map((id) => {
+          const d = fa[id];
+          return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
+            h('strong', { text: d.mine ? `Your report on ${d.code}` : `Reply to you on ${d.code}` }),
+            [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).length ? h('span', { class: 'muted', text: [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ') }) : null,
+            (d.items || []).map((c) => { const t = replyOf(c.text).text; return h('span', { class: 'muted', text: `💬 ${c.name}${replyOf(c.text).to === myLabel() ? ' replied to you' : ''}: ${t.length > 90 ? `${t.slice(0, 90)}…` : t}` }); }));
+        }) : h('p', { class: 'muted', text: 'No new notifications.' })));
+    }
+    bellEl.replaceChildren(...kids);
+  }
+  function goReport(id) {
+    if (state.machine !== 'SETUP') { window.alert('Finish or leave the current test first, then open the notification again.'); return; }
+    const d = freshActivity()[id];
+    if (d) pinnedFresh[id] = d;
+    markSeen(id);
+    bellOpen = false;
+    state.tab = 'reports'; state.ui = freshUi();
+    state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000 };
+    pendingScroll = id;
+    render(); renderBell();
+  }
+
+
+  /** "Reports & discussion" for one question, shown under the explanation: everyone's reports with votes and comments. Loaded on first open. */
+  function questionReports(q) {
+    const sts = new Map();
+    const det = h('details', { class: 'q-reports' });
+    const sum = h('summary', { text: 'Reports & discussion' });
+    const body = h('div');
+    det.append(sum, body);
+    const paint = () => {
+      if (!REGISTRY_URL) { body.replaceChildren(h('p', { class: 'muted', text: 'This site is not connected to the report sheet.' })); return; }
+      if (!reportsCache || reportsCache.loading) { body.replaceChildren(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' })); return; }
+      if (reportsCache.error) { body.replaceChildren(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports.' }), h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { reportsCache = null; load(); } } })); return; }
+      const mine = reportsCache.list.filter((r) => r.code === q.id && !r.deleted);
+      sum.textContent = `Reports & discussion (${mine.length})`;
+      body.replaceChildren(...(mine.length ? mine.map((r) => {
+        const st = sts.get(r.id) || (sts.set(r.id, {}), sts.get(r.id));
+        return h('div', { class: 'card rq-item' },
+          h('p', {}, h('strong', { text: `${r.types} · ${(r.status || '').trim() || 'Open'}` }), h('span', { class: 'muted', text: ` · ${r.t ? new Date(r.t).toLocaleDateString() : ''}` })),
+          h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
+          r.comment && h('p', {}, h('strong', { text: 'Comment: ' }), r.comment),
+          r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
+          voteRow(r, paint, st, `rq-${r.id}`), commentBox(r, st, paint, `rq-${r.id}`));
+      }) : [h('p', { class: 'muted', text: 'No reports for this question yet. Use "Report" if something looks wrong.' })]));
+    };
+    const load = async () => {
+      if (!REGISTRY_URL || (reportsCache && !reportsCache.error)) { paint(); return; }
+      reportsCache = { loading: true }; paint();
+      const list = await registry.reports();
+      reportsCache = list ? { list } : { error: true };
+      paint();
+    };
+    det.addEventListener('toggle', () => { if (det.open) load(); });
+    if (reportsCache && reportsCache.list) paint(); else sum.textContent = 'Reports & discussion';
+    return det;
+  }
+  function viewReports() {
+    const st = state.ui.rep || (state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20 });
+    const card = h('section', { class: 'card', id: 'reports' });
+    let marked = false;
+    const stOf = (r) => (r.status || '').trim() || 'Open';
+    const typesOf = (r) => r.types.split(',').map((s) => s.trim()).filter(Boolean);
+    const SORTS = [['new', 'Newest'], ['old', 'Oldest'], ['up', 'Most 👍'], ['down', 'Most 👎'], ['net', 'Best score (👍 − 👎)'], ['talk', 'Most comments']];
+    const cmp = {
+      new: (x, y) => y.t - x.t, old: (x, y) => x.t - y.t,
+      up: (x, y) => (y.up || 0) - (x.up || 0) || y.t - x.t, down: (x, y) => (y.down || 0) - (x.down || 0) || y.t - x.t,
+      net: (x, y) => ((y.up || 0) - (y.down || 0)) - ((x.up || 0) - (x.down || 0)) || y.t - x.t,
+      talk: (x, y) => (y.comments || []).length - (x.comments || []).length || y.t - x.t,
+    };
+    /** One report; repaints only itself, so the list keeps its scroll position and open sections. */
+    const reportCard = (r) => {
+      const root = h('article', { class: 'card rq-item', 'data-report-id': r.id });
+      const cs = { draft: '', msg: '', sending: false };
+      let nowOpen = false; let rendered = false;
+      const adminBar = () => {
+        if (!isAdmin()) return null;
+        const closed = stOf(r) !== 'Open';
+        const noteIn = h('input', { type: 'text', maxlength: '300', id: `rq-${r.id}-note`, placeholder: 'Admin note (shown to everyone)' });
+        noteIn.value = r.note || '';
+        const act = async (body, apply) => {
+          cs.admMsg = '';
+          const res = await adminPost({ app: 'quiz', id: r.id, ...body });
+          if (res) apply(); else cs.admMsg = 'Could not save. Is the sheet script updated and redeployed?';
+          paintOne();
+        };
+        const btn = (id, text, cls, fn) => h('button', { class: `btn ${cls || ''}`, type: 'button', id: `rq-${r.id}-${id}`, text, on: { click: fn } });
+        return h('div', { class: 'admin-bar' }, h('strong', { text: 'Admin' }),
+          h('div', { class: 'row' },
+            btn('status', closed ? 'Reopen thread' : 'Close thread', '', () => act({ action: 'astatus', status: closed ? '' : 'Closed', note: noteIn.value }, () => { r.status = closed ? '' : 'Closed'; r.note = noteIn.value.trim(); })),
+            btn('del', r.deleted ? 'Restore thread' : 'Delete thread', r.deleted ? '' : 'danger', () => { if (r.deleted || window.confirm('Delete this thread? Only admins will still see it (you can restore it).')) act({ action: 'adel', del: !r.deleted }, () => { r.deleted = !r.deleted; }); }),
+            state.byId.get(r.code) && btn('edit', '✎ Edit question', 'primary', () => { cs.edit = true; nowOpen = true; paintOne(); })),
+          h('div', { class: 'row' }, noteIn, btn('note', 'Save note', '', () => act({ action: 'astatus', note: noteIn.value }, () => { r.note = noteIn.value.trim(); }))),
+          cs.admMsg && h('p', { class: 'notice err', role: 'alert', text: cs.admMsg }));
+      };
+      const paintOne = () => {
+        const cur = state.byId.get(r.code);
+        const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: '👁 View the question now (full question, key and explanation)' }));
+        if (nowOpen) now.append(cur ? h('div', {}, stemNodes(cur), staticOptions(cur, undefined, true),
+          h('p', {}, h('strong', { text: 'Key now: ' }), `${letter(cur.correctIndex)}. ${cur.options[cur.correctIndex]}`), aiNote(cur), explanationNode(cur, true))
+          : h('p', { class: 'muted', text: 'This question is no longer in the bank.' }));
+        rendered = nowOpen;
+        now.addEventListener('toggle', () => { if (now.open && !rendered) paintOne(); });
+        root.className = `card rq-item${r.deleted ? ' deleted' : ''}`;
+        root.replaceChildren(...[
+          r.deleted && h('p', { class: 'notice err', text: '🗑 Deleted: only admins can see this thread.' }),
+          adminBar(),
+          cs.edit && state.byId.get(r.code) && (cs.ed || (cs.ed = adminEditor(state.byId.get(r.code), () => { cs.edit = false; cs.ed = null; paintOne(); }))),
+          h('p', {}, h('strong', { text: `${r.code} · ${stOf(r)}` }), h('span', { class: 'muted', text: ` · ${r.category}${state.byId.get(r.code) ? ` · Source: ${state.byId.get(r.code).source}` : ''} · ${r.t ? new Date(r.t).toLocaleString() : ''}` })),
+          h('p', { class: 'muted', text: `Type: ${r.types}` }),
+          h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
+          freshShown[r.id] && h('p', { class: 'notice ok', 'data-fresh': r.id, text: `🔔 New on your report: ${[freshShown[r.id].up && `+${freshShown[r.id].up} 👍`, freshShown[r.id].down && `+${freshShown[r.id].down} 👎`, freshShown[r.id].c && `+${freshShown[r.id].c} comment${freshShown[r.id].c === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}` }),
+          r.comment && h('p', { class: 'muted' }, h('strong', { text: 'Comment: ' }), r.comment),
+          r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
+          now,
+          h('details', {}, h('summary', { text: '🕘 View the question as it was when reported' }),
+            h('p', { class: 'prewrap', text: r.question }), h('p', { class: 'prewrap', text: r.choices }),
+            h('p', {}, h('strong', { text: 'Key then: ' }), r.key),
+            r.explanation && h('p', { class: 'prewrap' }, h('strong', { text: 'Explanation then: ' }), r.explanation)),
+          voteRow(r, paintOne, cs, `rq-${r.id}`), commentBox(r, cs, paintOne, `rq-${r.id}`)].filter(Boolean));
+      };
+      paintOne();
+      return root;
+    };
+    const paint = () => {
+      const kids = [h('h2', { text: 'Reports & Discussion' }),
+        h('p', { class: 'muted', text: 'Reports sent by everyone. Status is updated by the admin.' })];
+      if (!REGISTRY_URL) kids.push(h('p', { class: 'muted', text: 'This site is not connected to the report sheet.' }));
+      else if (!reportsCache || reportsCache.loading) kids.push(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' }));
+      else if (reportsCache.error) kids.push(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports. Check your connection (the sheet script must be updated and redeployed).' }),
+        h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { reportsCache = null; load(); } } }));
+      else {
+        const all = reportsCache.list;
+        const statuses = sortedUnique(all.map(stOf));
+        const types = sortedUnique(all.flatMap(typesOf));
+        const qq = st.query.trim().toLowerCase();
+        const shown = all.filter((r) => (st.status === 'all' || stOf(r) === st.status) && (st.type === 'all' || typesOf(r).includes(st.type))
+          && (!qq || (r.code + ' ' + r.question + ' ' + r.comment).toLowerCase().includes(qq))).sort(cmp[st.sort] || cmp.new);
+        const sel = (id, label, cur, opts, onc, labels) => h('label', { class: 'field' }, h('span', { text: label }),
+          h('select', { id, on: { change: (ev) => { onc(ev.target.value); st.limit = 20; paint(); } } },
+            opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
+        kids.push(h('div', { class: 'row' },
+          sel('rp-sort', 'Sort by', st.sort, SORTS, (v) => { st.sort = v; }),
+          sel('rp-status', 'Status', st.status, [['all', 'All'], ...statuses.map((x) => [x, x])], (v) => { st.status = v; }),
+          sel('rp-type', 'Type of error', st.type, [['all', 'All'], ...types.map((x) => [x, x])], (v) => { st.type = v; })),
+          h('label', { class: 'field' }, h('span', { text: 'Search code / question / comment' }),
+            h('input', { id: 'rp-query', type: 'text', value: st.query, autocomplete: 'off', on: { change: (ev) => { st.query = ev.target.value; st.limit = 20; paint(); } } })),
+          h('p', { class: 'muted', id: 'rp-count', role: 'status', text: `${shown.length} of ${all.length} reports.` }));
+        freshShown = { ...freshActivity(), ...pinnedFresh };
+        const nf = Object.keys(freshShown).length;
+        if (nf) kids.push(h('p', { class: 'notice ok', id: 'rp-fresh', role: 'status', text: `🔔 New activity on ${nf} of your report${nf === 1 ? '' : 's'} (marked below).` }));
+        const part = shown.slice(0, st.limit);
+        kids.push(h('div', { id: 'rp-list' }, part.length ? part.map(reportCard) : h('p', { class: 'muted', text: 'No reports match.' })));
+        if (shown.length > part.length) kids.push(h('div', { class: 'form-actions' }, h('button', { class: 'btn', type: 'button', id: 'rp-more', text: `Show more (${shown.length - part.length} left)`, on: { click: () => { st.limit += 20; paint(); } } })));
       }
-      saveBtn.disabled = true; if (revBtn) revBtn.disabled = true;
-      const p = await sealJson({ kind, set, before, note: note.value.trim() });
-      const res = await adminPost({ action: 'aedit', item: c.id, kind, rev: remote.rev.get(c.id) || 0, p });
-      saveBtn.disabled = false; if (revBtn) revBtn.disabled = false;
-      if (!res) { show('Could not save. Check your connection and that the sheet script is updated and redeployed.'); return; }
-      if (res.conflict) { await loadRemote(true); show('Another admin edited this case in the meantime. The latest version is loaded: close and open the editor again.'); return; }
-      await loadRemote(true);
-      close(true);
+      card.replaceChildren(...kids.filter(Boolean));
+      if (pendingScroll && card.querySelector(`[data-report-id="${pendingScroll}"]`)) {
+        const id = pendingScroll; pendingScroll = null;
+        setTimeout(() => { const el = document.querySelector(`[data-report-id="${id}"]`); if (el) { el.scrollIntoView({ block: 'start' }); el.classList.add('flash'); } }, 50);
+      }
     };
-    const mk = (id, text, cls, fn) => h('button', { class: `btn ${cls}`, type: 'button', id, text, on: { click: fn } });
-    const saveBtn = mk('ae-save', 'Save for everyone', 'primary', () => send('edit'));
-    const revBtn = remote.cur.has(c.id) ? mk('ae-revert', 'Revert to original', 'danger', () => { if (window.confirm('Revert this case to the original version for everyone?')) send('revert'); }) : null;
-    return h('div', { class: 'editor admin-editor', id: 'admin-editor' },
-      h('h3', { text: `Edit No. ${numOf(c)} (saved for everyone)` }), fields,
-      h('details', {}, h('summary', { text: `Anamnesis (${anam.length})` }), anam.map((x) => x.node)),
-      quotes.length ? h('details', {}, h('summary', { text: `Physical examination / test text (${quotes.length})` }), quotes.map((x) => x.node)) : null,
-      h('p', { class: 'muted', text: 'Images and tables are not editable here.' }),
-      h('label', { for: 'ae-note', text: 'Reason' }), note, msg,
-      h('div', { class: 'row' }, saveBtn, mk('ae-cancel', 'Cancel', '', () => close(false)), revBtn));
+    const load = async () => {
+      if (!REGISTRY_URL || (reportsCache && !reportsCache.error)) return;
+      reportsCache = { loading: true }; paint();
+      const list = await registry.reports();
+      reportsCache = list ? { list } : { error: true };
+      renderBell();
+      if (state.machine === 'SETUP' && state.tab === 'reports') paint();
+    };
+    paint(); load();
+    return [card];
   }
-  /** Admin tab: device ID, admins (add / remove) and the edit log. */
-  function adminView() {
-    stopClock();
+
+
+  /** Admin tab: device ID, list of admins (add / remove) and the edit log. */
+  function viewAdmin() {
     const card = h('section', { class: 'card', id: 'admin-panel' });
     let admins = null; let msg = '';
     const load = async () => {
-      const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}action=admins&device=${encodeURIComponent(st.user.id)}`, { method: 'GET' });
+      const d = await registry.call({ method: 'GET' }, `action=admins&device=${encodeURIComponent(state.user.id)}`);
       admins = d && Array.isArray(d.admins) ? d.admins : false; paint();
     };
     const idIn = h('input', { id: 'ad-id', type: 'text', placeholder: 'Device ID, e.g. 21faf0a4-0960-…', autocomplete: 'off', maxlength: '64' });
@@ -1022,367 +2195,555 @@
       msg = res ? 'Admin added.' : 'Could not add. Is the sheet script updated and redeployed?';
       if (res) { idIn.value = ''; lbIn.value = ''; await load(); } else paint();
     };
-    const del = async (id) => { if (!window.confirm('Remove this admin?')) return; const res = await adminPost({ action: 'aadmin_del', target: id }); msg = res ? 'Admin removed.' : 'Could not remove.'; await load(); };
+    const del = async (id) => {
+      if (!window.confirm('Remove this admin?')) return;
+      const res = await adminPost({ action: 'aadmin_del', target: id });
+      msg = res ? 'Admin removed.' : 'Could not remove.'; await load();
+    };
     const log = [...remote.hist.entries()].flatMap(([item, hs]) => hs.map((e) => ({ item, ...e }))).sort((x, y) => (y.t || 0) - (x.t || 0)).slice(0, 50);
     const paint = () => card.replaceChildren(...[
-      h('h2', { text: 'Admin' }), h('p', { class: 'muted' }, 'Your device ID: ', h('code', { text: st.user.id })),
+      h('h2', { text: 'Admin' }),
+      h('p', { class: 'muted' }, 'Your device ID: ', h('code', { text: state.user.id })),
       h('h3', { text: 'Admins' }),
       admins === null ? h('p', { class: 'muted', role: 'status', text: 'Loading…' })
         : admins === false ? h('p', { class: 'notice err', role: 'alert', text: 'Could not load the admin list.' })
-          : h('div', { id: 'admin-list' }, admins.map((a) => h('div', { class: 'qa' }, h('code', { text: a.id }), ` ${a.label || ''}${a.seed ? ' (owner)' : ''} `,
-            !a.seed && a.id !== st.user.id && h('button', { class: 'btn reply-btn', type: 'button', text: 'Remove', 'data-del': a.id, on: { click: () => del(a.id) } })))),
-      h('h3', { text: 'Add admin' }), h('p', { class: 'muted', text: 'Ask the person to copy their device ID from the main screen ("Device ID") and send it to you.' }),
+          : h('ul', { class: 'hist-list', id: 'admin-list' }, admins.map((a) => h('li', { class: 'hist-item cm' },
+            h('code', { text: a.id }), ` ${a.label || ''}${a.seed ? ' (owner)' : ''} `,
+            !a.seed && a.id !== state.user.id && h('button', { class: 'btn reply-btn', type: 'button', text: 'Remove', 'data-del': a.id, on: { click: () => del(a.id) } })))),
+      h('h3', { text: 'Add admin' }),
+      h('p', { class: 'muted', text: 'Ask the person to copy their device ID from the main screen ("Device ID") and send it to you.' }),
       h('label', { for: 'ad-id', text: 'Device ID' }), idIn, h('label', { for: 'ad-label', text: 'Name' }), lbIn,
-      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', id: 'ad-add', text: 'Add admin', on: { click: add } })),
+      h('div', { class: 'form-actions' }, h('button', { class: 'btn primary', type: 'button', id: 'ad-add', text: 'Add admin', on: { click: add } })),
       msg && h('p', { class: 'notice', role: 'status', text: msg }),
       h('h3', { text: 'Edit log (latest 50)' }),
-      log.length ? log.map((e) => h('div', { class: 'qa' }, h('strong', { text: e.item }), h('span', { class: 'muted', text: ` · ${e.kind === 'revert' ? 'reverted' : `edit #${e.rev}`} · ${e.by} · ${e.t ? new Date(e.t).toLocaleString() : ''}${e.note ? ` · ${e.note}` : ''}` }))) : h('p', { class: 'muted', text: 'No edits yet.' }),
+      log.length ? h('ul', { class: 'hist-list' }, log.map((e) => h('li', { class: 'hist-item' }, h('strong', { text: e.item }),
+        h('span', { class: 'muted', text: ` · ${e.kind === 'revert' ? 'reverted' : `edit #${e.rev}`} · ${e.by} · ${e.t ? new Date(e.t).toLocaleString() : ''}${e.note ? ` · ${e.note}` : ''}` }))))
+        : h('p', { class: 'muted', text: 'No edits yet.' }),
     ].filter(Boolean));
-    mount(tabBar('admin'), card);
     paint(); load();
-  }
-  let caseReports = null;
-  async function loadCaseReports() {
-    const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}app=osce&action=reports&device=${encodeURIComponent(st.user ? st.user.id : '')}`, { method: 'GET' });
-    return d && Array.isArray(d.reports) ? d.reports : null;
-  }
-  /* notifications for my own reports: other people's thumbs up/down and comments since I last opened the Reports tab */
-  const SEEN_KEY = 'osce.repseen.v1';
-  const isMine = (r) => (r.dev ? r.own : r.by === userLabel());
-  const seenMap = () => { const m = store.read(SEEN_KEY, {}); return m && typeof m === 'object' ? m : {}; };
-  const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)), c: (r.comments || []).filter((c) => c.name !== userLabel()).length,
-    m: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).length });
-  /** A reply starts with @[Name (University)] followed by the text. */
-  function replyOf(text) {
-    const m = /^@\[([^\]]{2,140}(?:\([^)]*\))?)\]\s?/.exec(text || '');
-    return m ? { to: m[1], text: (text || '').slice(m[0].length) } : { to: '', text: text || '' };
-  }
-  function freshActivity() {
-    const out = {};
-    if (!caseReports || !caseReports.list || !st.user) return out;
-    const seen = seenMap();
-    for (const r of caseReports.list) {
-      const o = othersOf(r);
-      if (!isMine(r)) {
-        const m = Math.max(0, o.m - ((seen[r.id] || {}).m || 0));
-        if (m) out[r.id] = { up: 0, down: 0, c: 0, m, mine: false, title: `No. ${r.no} ${r.title}`, items: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).slice(-m) };
-        continue;
-      }
-      const s0 = seen[r.id] || { up: 0, down: 0, c: 0 };
-      const d = { up: Math.max(0, o.up - s0.up), down: Math.max(0, o.down - s0.down), c: Math.max(0, o.c - s0.c), m: 0, mine: true };
-      if (d.c) d.items = (r.comments || []).filter((c) => c.name !== userLabel()).slice(-d.c);
-      if (d.up || d.down || d.c) { d.title = `No. ${r.no} ${r.title}`; out[r.id] = d; }
-    }
-    return out;
-  }
-  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m, 0);
-  function markSeen(onlyId) {
-    if (!caseReports || !caseReports.list) return;
-    const seen = seenMap();
-    for (const r of caseReports.list) { const o = othersOf(r); if ((isMine(r) || o.m) && (!onlyId || r.id === onlyId)) seen[r.id] = o; }
-    store.write(SEEN_KEY, seen);
-    renderBell();
-  }
-  let freshShown = {}; let prefetched = false;
-  /* bell (top right): new thumbs up/down and comments on my reports; a click opens that thread */
-  let bellEl = null; let bellOpen = false; let pendingScroll = null; let pinnedFresh = {};
-  function renderBell() {
-    if (!REGISTRY_URL || !st.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
-    if (!bellEl) { bellEl = h('div', { class: 'bell noprint', id: 'bell' }); document.body.append(bellEl); }
-    const fa = freshActivity(); const ids = Object.keys(fa);
-    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m, 0);
-    const kids = [h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
-      on: { click: () => { bellOpen = !bellOpen; renderBell(); } } })];
-    if (bellOpen) {
-      kids.push(h('div', { class: 'bell-panel card', id: 'bell-panel' },
-        h('div', { class: 'row' }, h('strong', { text: 'Notifications' }), ids.length ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => markSeen() } }) : null),
-        ids.length ? ids.map((id) => {
-          const d = fa[id]; const votes = [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ');
-          return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
-            h('strong', { text: d.mine ? `Your report: ${d.title}` : `Reply to you: ${d.title}` }), votes ? h('span', { class: 'muted', text: votes }) : null,
-            (d.items || []).map((c) => { const t = replyOf(c.text).text; return h('span', { class: 'muted', text: `💬 ${c.name}${replyOf(c.text).to === userLabel() ? ' replied to you' : ''}: ${t.length > 90 ? `${t.slice(0, 90)}…` : t}` }); }));
-        }) : h('p', { class: 'muted', text: 'No new notifications.' })));
-    }
-    bellEl.replaceChildren(...kids);
-  }
-  function goReport(id) {
-    if (!document.getElementById('home-tabs') && !window.confirm('Leave this screen? A running case will be cancelled.')) return;
-    const d = freshActivity()[id];
-    if (d) pinnedFresh[id] = d;
-    bellOpen = false; markSeen(id);
-    Object.assign(repUi, { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000 });
-    pendingScroll = id;
-    caseReportsView(); renderBell();
+    return [card];
   }
 
-  async function prefetchReports() {
-    if (prefetched || !REGISTRY_URL || !st.user) return;
-    prefetched = true;
-    renderBell();
-    if (!caseReports) { const list = await loadCaseReports(); caseReports = list ? { list } : null; }
-    renderBell();
-    setInterval(async () => {
-      if (document.hidden) return;
-      const list = await loadCaseReports();
-      if (list && !document.getElementById('reports-card')) { caseReports = { list }; renderBell(); }
-      else if (!list) renderBell();
-      if (!editingOpen) loadRemote(false).catch(() => {});
-    }, 90000);
-  }
-  /** Top tabs, like Quiz Time: All questions (the main menu) and Reports & Discussion. */
-  function tabBar(active) {
-    return h('div', { class: 'tabs', role: 'tablist', id: 'home-tabs' }, [['all', 'All questions'], ['reports', 'Reports & Discussion'], ...(isAdmin() ? [['admin', 'Admin']] : [])].map(([id, label]) => h('button', {
-      class: `tab${active === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`, 'aria-selected': String(active === id), text: label,
-      on: { click: () => { if (id === active) return; freshShown = {}; pinnedFresh = {}; if (id === 'all') home(); else if (id === 'admin') adminView(); else caseReportsView(); } } })));
-  }
-  const repUi = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20 };
-  function caseReportsView() {
-    stopClock();
-    const card = h('section', { class: 'card', id: 'reports-card' });
-    let marked = false;
-    const stOf = (r) => (r.status || '').trim() || 'Open';
-    const T = (r) => r.types.split(',').map((x) => x.trim()).filter(Boolean);
-    const uniq = (arr) => [...new Set(arr)].sort((x, y) => x.localeCompare(y));
-    const SORTS = [['new', 'Newest'], ['old', 'Oldest'], ['up', 'Most 👍'], ['down', 'Most 👎'], ['net', 'Best score (👍 − 👎)'], ['talk', 'Most comments']];
-    const cmp = { new: (x, y) => y.t - x.t, old: (x, y) => x.t - y.t, up: (x, y) => (y.up || 0) - (x.up || 0) || y.t - x.t, down: (x, y) => (y.down || 0) - (x.down || 0) || y.t - x.t,
-      net: (x, y) => ((y.up || 0) - (y.down || 0)) - ((x.up || 0) - (x.down || 0)) || y.t - x.t, talk: (x, y) => (y.comments || []).length - (x.comments || []).length || y.t - x.t };
-    const reportCard = (r) => {
-      const root = h('article', { class: 'card rq-item', 'data-report-id': r.id });
-      const cs = { draft: '', msg: '', sending: false }; let nowOpen = false; let rendered = false;
-      const adminBar = () => {
-        if (!isAdmin()) return null;
-        const closed = stOf(r) !== 'Open';
-        const noteIn = h('input', { type: 'text', maxlength: '300', id: `rq-${r.id}-note`, placeholder: 'Admin note (shown to everyone)' });
-        noteIn.value = r.note || '';
-        const act = async (body, apply) => { cs.admMsg = ''; const res = await adminPost({ id: r.id, ...body }); if (res) apply(); else cs.admMsg = 'Could not save. Is the sheet script updated and redeployed?'; paintOne(); };
-        const btn = (id, text, cls, fn) => h('button', { class: `btn ${cls || ''}`, type: 'button', id: `rq-${r.id}-${id}`, text, on: { click: fn } });
-        return h('div', { class: 'admin-bar' }, h('strong', { text: 'Admin' }),
-          h('div', { class: 'row' },
-            btn('status', closed ? 'Reopen thread' : 'Close thread', '', () => act({ action: 'astatus', status: closed ? '' : 'Closed', note: noteIn.value }, () => { r.status = closed ? '' : 'Closed'; r.note = noteIn.value.trim(); })),
-            btn('del', r.deleted ? 'Restore thread' : 'Delete thread', r.deleted ? '' : 'danger', () => { if (r.deleted || window.confirm('Delete this thread? Only admins will still see it (you can restore it).')) act({ action: 'adel', del: !r.deleted }, () => { r.deleted = !r.deleted; }); }),
-            st.byId.get(r.code) && btn('edit', '✎ Edit case', 'primary', () => { cs.edit = true; nowOpen = true; paintOne(); })),
-          h('div', { class: 'row' }, noteIn, btn('note', 'Save note', '', () => act({ action: 'astatus', note: noteIn.value }, () => { r.note = noteIn.value.trim(); }))),
-          cs.admMsg && h('p', { class: 'notice err', role: 'alert', text: cs.admMsg }));
-      };
-      const paintOne = () => {
-        const c = st.byId.get(r.code);
-        const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: '👁 View the case now (full case, key and explanations)' }));
-        if (nowOpen) now.append(c ? fullCase(c) : h('p', { class: 'muted', text: 'This case is no longer in the case list.' }));
-        rendered = nowOpen;
-        now.addEventListener('toggle', () => { if (now.open && !rendered) paintOne(); });
-        const f = freshShown[r.id];
-        root.className = `card rq-item${r.deleted ? ' deleted' : ''}`;
-        root.replaceChildren(...[
-          r.deleted && h('p', { class: 'notice err', text: '🗑 Deleted: only admins can see this thread.' }),
-          adminBar(),
-          cs.edit && c && (cs.ed || (cs.ed = adminEditor(c, () => { cs.edit = false; cs.ed = null; paintOne(); }))),
-          h('p', {}, h('strong', { text: `No. ${r.no} · [${r.source}] ${r.title}` }), h('span', { class: 'muted', text: ` · ${stOf(r)} · ${r.t ? new Date(r.t).toLocaleString() : ''}` })),
-          h('p', { class: 'muted', text: `Type: ${r.types}` }),
-          h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
-          f && h('p', { class: 'notice ok', 'data-fresh': r.id, text: `🔔 New on your report: ${[f.up && `+${f.up} 👍`, f.down && `+${f.down} 👎`, f.c && `+${f.c} comment${f.c === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}` }),
-          r.comment && h('p', {}, h('strong', { text: 'Comment: ' }), r.comment),
-          r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
-          now, repVoteRow(r, paintOne, cs, `rq-${r.id}`), repCommentBox(r, paintOne, cs, `rq-${r.id}`)].filter(Boolean));
-      };
-      paintOne();
-      return root;
+  function viewPrint() {
+    const f = state.ui.print;
+    const inTab = scopeQs();
+    const categories = sortedUnique(inTab.map((q) => q.category));
+    const sources = sortedUnique(inTab.map((q) => q.source));
+    const totalBy = (key) => { const m = new Map(); for (const q of inTab) m.set(q[key], (m.get(q[key]) || 0) + 1); return m; };
+    const catTotals = totalBy('category'); const srcTotals = totalBy('source');
+    const status = h('select', { id: 'p-status' },
+      h('option', { value: 'all', text: 'All statuses (done and not done)' }),
+      h('option', { value: 'unattempted', text: STATUS_LABEL.unattempted }),
+      h('option', { value: 'correct', text: STATUS_LABEL.correct }),
+      h('option', { value: 'incorrect', text: STATUS_LABEL.incorrect }));
+    const query = h('input', { id: 'p-query', type: 'text', placeholder: 'Search question text', autocomplete: 'off' });
+    status.value = f.status; query.value = f.query;
+    const keyBox = h('input', { id: 'p-key', type: 'checkbox', checked: f.key });
+    const explBox = h('input', { id: 'p-expl', type: 'checkbox', checked: f.expl });
+    const info = h('p', { class: 'muted', id: 'p-count', role: 'status' });
+    const list = h('ul', { class: 'review', id: 'p-list' });
+    const printBtn = h('button', { class: 'btn primary', type: 'button', id: 'p-go', text: 'Print / Save as PDF' });
+    let shown = [];
+
+    const refreshInfo = () => {
+      info.textContent = `${f.sel.size} selected · ${shown.length} shown of ${inTab.length} questions.`;
+      printBtn.disabled = f.sel.size === 0;
     };
     const paint = () => {
-      const kids = [h('h2', { text: 'Reports & Discussion' }), h('p', { class: 'muted', text: 'Reports sent by everyone. Status is updated by the admin.' })];
-      if (!REGISTRY_URL) kids.push(h('p', { class: 'muted', text: 'This site is not connected to the report sheet.' }));
-      else if (!caseReports || caseReports.loading) kids.push(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' }));
-      else if (caseReports.error) kids.push(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports. Check your connection (the sheet script must be updated and redeployed).' }), h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { caseReports = null; load(); } } }));
-      else {
-        const all = caseReports.list; const qq = repUi.query.trim().toLowerCase();
-        const shown = all.filter((r) => (repUi.status === 'all' || stOf(r) === repUi.status) && (repUi.type === 'all' || T(r).includes(repUi.type)) && (!qq || `${r.title} ${r.source} ${r.no} ${r.comment}`.toLowerCase().includes(qq))).sort(cmp[repUi.sort] || cmp.new);
-        const sel = (id, label, cur, opts, onc) => h('div', { class: 'sel' }, h('label', { for: id, text: label }),
-          h('select', { id, on: { change: (ev) => { onc(ev.target.value); repUi.limit = 20; paint(); } } }, opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
-        kids.push(sel('rp-sort', 'Sort by:', repUi.sort, SORTS, (v) => { repUi.sort = v; }),
-          sel('rp-status', 'Status:', repUi.status, [['all', 'All'], ...uniq(all.map(stOf)).map((x) => [x, x])], (v) => { repUi.status = v; }),
-          sel('rp-type', 'Type of error:', repUi.type, [['all', 'All'], ...uniq(all.flatMap(T)).map((x) => [x, x])], (v) => { repUi.type = v; }),
-          h('label', { for: 'rp-query', text: 'Search case title / source / number / comment' }),
-          h('input', { id: 'rp-query', type: 'text', value: repUi.query, autocomplete: 'off', on: { change: (ev) => { repUi.query = ev.target.value; repUi.limit = 20; paint(); } } }),
-          h('p', { class: 'muted', id: 'rp-count', role: 'status', text: `${shown.length} of ${all.length} reports.` }));
-        freshShown = { ...freshActivity(), ...pinnedFresh };
-        const nf = Object.keys(freshShown).length;
-        if (nf) kids.push(h('p', { class: 'notice ok', id: 'rp-fresh', role: 'status', text: `🔔 New activity on ${nf} of your report${nf === 1 ? '' : 's'} (marked below).` }));
-        const part = shown.slice(0, repUi.limit);
-        kids.push(h('div', { id: 'rp-list' }, part.length ? part.map(reportCard) : h('p', { class: 'muted', text: 'No reports match.' })));
-        if (shown.length > part.length) kids.push(h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', id: 'rp-more', text: `Show more (${shown.length - part.length} left)`, on: { click: () => { repUi.limit += 20; paint(); } } })));
-      }
-      card.replaceChildren(...kids.filter(Boolean));
-      if (pendingScroll && card.querySelector(`[data-report-id="${pendingScroll}"]`)) {
-        const id = pendingScroll; pendingScroll = null;
-        setTimeout(() => { const el = document.querySelector(`[data-report-id="${id}"]`); if (el) { el.scrollIntoView({ block: 'start' }); el.classList.add('flash'); } }, 50);
-      }
+      f.status = status.value; f.query = query.value;
+      const needle = f.query.trim().toLowerCase();
+      shown = inTab.filter((q) => {
+        const st = state.progress[q.id] || 'unattempted';
+        return (f.status === 'all' || st === f.status) && inSet(f.cats, q.category) && inSet(f.srcs, q.source) && inTj(f.tj, q)
+          && (!needle || q.question.toLowerCase().includes(needle) || q.id.toLowerCase() === needle);
+      });
+      list.replaceChildren(...(shown.length ? shown.map((q) => {
+        const cb = h('input', { type: 'checkbox', 'data-id': q.id, checked: f.sel.has(q.id) });
+        cb.addEventListener('change', guard(() => { if (cb.checked) f.sel.add(q.id); else f.sel.delete(q.id); refreshInfo(); }));
+        return h('li', { class: 'review-item p-pick' },
+          h('label', { class: 'inline-check' }, cb,
+            h('span', {}, h('b', { text: `${labelOf(q)} ` }), statusBadge(state.progress[q.id] || 'unattempted'),
+              h('span', { class: 'p-snippet', text: q.question.length > 160 ? `${q.question.slice(0, 160)}…` : q.question }))));
+      }) : [h('li', { class: 'muted', text: 'No questions match these filters.' })]));
+      refreshInfo();
     };
-    const load = async () => {
-      if (!REGISTRY_URL || (caseReports && !caseReports.error)) return;
-      caseReports = { loading: true }; paint();
-      const list = await loadCaseReports();
-      caseReports = list ? { list } : { error: true };
-      renderBell();
-      if (document.getElementById('reports-card')) paint();
-    };
-    mount(tabBar('reports'), card);
-    paint(); load();
-  }
-  function repVoteRow(r, paint, cs, pre) {
-    const cast = async (v) => {
-      if (!st.user || r.busy) return;
-      const prev = r.mine || 0; const next = prev === v ? 0 : v;
-      r.busy = true;
-      const res = await postJson({ action: 'rvote', id: r.id, device: st.user.id, vote: next });
-      r.busy = false;
-      if (!res) { cs.msg = 'Could not save your vote. Try again.'; paint(); return; }
-      if (prev > 0) r.up = Math.max(0, (r.up || 0) - 1);
-      if (prev < 0) r.down = Math.max(0, (r.down || 0) - 1);
-      if (next > 0) r.up = (r.up || 0) + 1;
-      if (next < 0) r.down = (r.down || 0) + 1;
-      r.mine = next; cs.msg = ''; paint();
-    };
-    const btn = (v, label, n, id) => h('button', { class: `btn${(r.mine || 0) === v ? ' primary' : ''}`, type: 'button', id, 'aria-pressed': String((r.mine || 0) === v), text: `${label} ${n || 0}`, on: { click: () => cast(v) } });
-    return h('div', { class: 'row' }, btn(1, '👍', r.up, `${pre}-up`), btn(-1, '👎', r.down, `${pre}-down`));
-  }
-  function repCommentBox(r, paint, cs, pre) {
-    const ta = h('textarea', { id: `${pre}-ctext`, rows: '3', maxlength: '800', placeholder: 'Write a comment…', on: { input: (ev) => { cs.draft = ev.target.value; } } });
-    ta.value = cs.draft || '';
-    const send = async () => {
-      const body = (cs.draft || '').trim();
-      if (body.length < 2 || !st.user || cs.sending) return;
-      const text = cs.replyTo ? `@[${cs.replyTo}] ${body}` : body;
-      cs.sending = true;
-      const res = await postJson({ action: 'rcomment', id: r.id, name: userLabel(), text });
-      cs.sending = false;
-      if (!res) { cs.msg = 'Could not send the comment. Try again.'; paint(); return; }
-      (r.comments || (r.comments = [])).push({ t: Date.now(), name: userLabel(), text });
-      cs.draft = ''; cs.msg = ''; cs.replyTo = ''; paint();
-    };
-    return h('div', { id: `${pre}-comments` }, h('h3', { text: `Comments (${(r.comments || []).length})` }),
-      (r.comments || []).length ? r.comments.map((c) => { const rp = replyOf(c.text); return h('div', { class: 'qa' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
-        h('p', { class: 'prewrap' }, rp.to && h('span', { class: `mention${rp.to === userLabel() ? ' me' : ''}`, text: `@${rp.to}` }), rp.to && ' ', rp.text),
-        c.hidden && h('p', { class: 'muted', text: '(hidden from users)' }),
-        isAdmin() && c.cid && h('button', { class: 'btn reply-btn', type: 'button', text: c.hidden ? 'Unhide' : 'Hide', on: { click: async () => { const res = await adminPost({ action: 'ahide', id: r.id, cid: c.cid, hide: !c.hidden }); if (res) { c.hidden = !c.hidden; paint(); } } } }),
-        c.name !== userLabel() && h('button', { class: 'btn reply-btn', type: 'button', text: '↩ Reply', on: { click: () => { cs.replyTo = c.name; paint(); const t = document.getElementById(`${pre}-ctext`); if (t) t.focus(); } } })); }) : h('p', { class: 'muted', text: 'No comments yet.' }),
-      cs.replyTo && h('p', { class: 'muted reply-to' }, `Replying to ${cs.replyTo} `, h('button', { class: 'btn', type: 'button', text: '✕', 'aria-label': 'Cancel reply', on: { click: () => { cs.replyTo = ''; paint(); } } })),
-      cs.msg && h('p', { class: 'notice err', role: 'alert', text: cs.msg }), ta,
-      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', id: `${pre}-csend`, text: 'Send comment', on: { click: send } })));
+    status.addEventListener('change', guard(paint));
+    query.addEventListener('input', guard(paint));
+    keyBox.addEventListener('change', guard(() => { f.key = keyBox.checked; }));
+    explBox.addEventListener('change', guard(() => { f.expl = explBox.checked; }));
+    const catGroup = multiCheck('p-cat', 'Categories',
+      categories.map((c) => ({ value: c, label: () => `${c} (${catTotals.get(c)})` })),
+      () => f.cats, (v) => { f.cats = v; }, () => { catGroup.refresh(); paint(); });
+    const srcGroup = multiCheck('p-src', 'Sources',
+      sources.map((v) => ({ value: v, label: () => `${v} (${srcTotals.get(v)})` })),
+      () => f.srcs, (v) => { f.srcs = v; }, () => { srcGroup.refresh(); paint(); });
+    const tjGroup = tjFilter('p', () => f.tj, (i, code) => inTab.filter((q) => tjOf(q, i) === code).length, () => { tjGroup.refresh(); paint(); });
+    paint();
+    printBtn.addEventListener('click', guard(() => {
+      const qs = inTab.filter((q) => f.sel.has(q.id));
+      if (!qs.length) return;
+      if (qs.length > 300 && !window.confirm(`${qs.length} questions is a long document. Continue?`)) return;
+      doPrint(qs, { key: keyBox.checked, expl: explBox.checked });
+    }));
+    const selShown = h('button', { class: 'btn', type: 'button', id: 'p-sel-all', text: 'Select all shown', on: { click: () => { shown.forEach((q) => f.sel.add(q.id)); paint(); } } });
+    const selNone = h('button', { class: 'btn', type: 'button', id: 'p-sel-none', text: 'Clear selection', on: { click: () => { f.sel.clear(); paint(); } } });
+    const field = (label, id, control) => h('div', {}, h('label', { for: id, text: label }), control);
+    return [
+      backButton(),
+      h('section', { class: 'card' },
+        h('h2', { text: `Print questions (${(TABS.find(([id]) => id === state.tab) || [])[1]})` }),
+        h('p', { class: 'muted', text: 'Filter, tick the questions you want, then print. In the print window choose "Save as PDF" as the destination.' }),
+        h('div', { class: 'filters' }, field('Status', 'p-status', status), field('Search', 'p-query', query)),
+        catGroup.node, srcGroup.node, tjGroup.node,
+        h('label', { class: 'inline-check', for: 'p-key' }, keyBox, 'Include answer key'),
+        h('label', { class: 'inline-check', for: 'p-expl' }, explBox, 'Include explanations'),
+        h('div', { class: 'row' }, selShown, selNone),
+        info,
+        h('div', { class: 'form-actions' }, printBtn)),
+      list,
+    ];
   }
 
-  /* ---- all questions ---- */
-  function fullCase(c, o) {
-    const tests = otherTests(c);
-    const mark = o && o.opened;
-    const n = mark ? tests.filter((x) => o.opened.has(x.label)).length : 0;
-    return h('div', { class: 'full' },
-      h('h3', { text: 'Clinical scenario' }), scenario(c),
-      c.incomplete && h('p', { class: 'notice', text: 'This source case is incomplete (no history answers, test results or prescription).' }),
-      h('h3', { text: 'Anamnesis (expected answers)' }),
-      c.anamnesis.length ? c.anamnesis.map((x) => h('div', { class: 'qa' }, h('div', { class: 'q', text: x.q }), h('div', { text: x.a }))) : h('p', { class: 'muted', text: 'No anamnesis answers in the source.' }),
-      h('h3', { text: 'Diagnostic results' }),
-      mark && tests.length ? h('p', { class: 'muted', id: o.ids ? 'acc-sum' : null, text: `${n} of ${tests.length} supplementary examinations were accessed in stage 2.` }) : null,
-      tests.length ? tests.map((x) => h('div', { class: 'tst' },
-        h('h4', {}, x.label, aiTest(x), mark && h('span', { class: o.opened.has(x.label) ? 'badge acc' : 'badge no', text: o.opened.has(x.label) ? 'Accessed in stage 2' : 'Not accessed' })),
-        resultBody(x, true))) : h('p', { class: 'muted', text: 'None.' }),
-      h('h2', { class: 'sub', text: 'Answer key' }), keyBody(c, !!(o && o.ids)), editInfo(c));
+  function viewManage() {
+    const slot = h('div', { class: 'notice-slot' }, noticeNode(state.ui.notice));
+    refs.notice = slot;
+
+    const importText = h('textarea', { id: 'import-text', placeholder: 'Paste a JSON array here, or load a .json file' });
+    const fileIn = h('input', {
+      id: 'import-file', type: 'file', accept: '.json,application/json',
+      on: {
+        change: () => {
+          const file = fileIn.files && fileIn.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = guard(() => {
+            importText.value = String(reader.result);
+            paintNotice('ok', `Loaded ${file.name}. Review it, then click Import.`);
+          });
+          reader.onerror = guard(() => paintNotice('err', 'Could not read that file.'));
+          reader.readAsText(file);
+        },
+      },
+    });
+    const reassign = h('input', { id: 'import-reassign', type: 'checkbox' });
+    const importBtn = h('button', {
+      class: 'btn primary', type: 'button', id: 'import-btn', text: 'Import',
+      on: {
+        click: () => {
+          const res = importQuestions(importText.value, reassign.checked);
+          if (res.ok) { state.ui.notice = { type: 'ok', text: res.message }; render(); }
+          else paintNotice('err', res.message, res.details);
+        },
+      },
+    });
+
+    const localCount = state.custom.length;
+    return [
+      backButton(),
+      slot,
+      h('section', { class: 'card' },
+        h('h2', { text: 'Import questions (JSON)' }),
+        h('p', { class: 'muted', text: 'Expected format: an array of { id, category, question, options, correctIndex, explanation }.' }),
+        h('label', { for: 'import-file', text: 'Load from file' }), fileIn,
+        h('label', { for: 'import-text', text: 'Or paste JSON' }), importText,
+        h('label', { class: 'inline-check' }, reassign, 'Assign new IDs automatically (ignore the IDs in the JSON)'),
+        h('div', { class: 'form-actions' }, importBtn)
+      ),
+      h('section', { class: 'card' },
+        h('h2', { text: 'Save to your site' }),
+        h('p', { id: 'bank-info', text: `${state.questions.length} questions total, ${localCount} imported in this browser and not yet in ${BANK_URL}.` }),
+        h('p', { id: 'edits-info', text: `${Object.keys(state.edits).length} answer-key edit(s) made in this browser and not yet in ${BANK_URL}.` }),
+        h('p', { class: 'muted', text: `Download the merged file (it includes your answer-key edits), replace ${BANK_URL} in your repository, and commit. Local imports and edits are cleaned up automatically once they appear in the committed file.` }),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn primary', type: 'button', id: 'export', text: `Download updated ${BANK_URL}`, on: { click: exportBank } }),
+          h('button', {
+            class: 'btn danger', type: 'button', id: 'clear-local', text: 'Discard local imports', disabled: localCount === 0,
+            on: {
+              click: () => {
+                if (!window.confirm(`Discard ${localCount} locally imported question(s)?`)) return;
+                state.custom = [];
+                saveCustom();
+                rebuildQuestions();
+                state.ui.notice = { type: 'ok', text: 'Local imports discarded.' };
+                render();
+              },
+            },
+          })
+        )
+      ),
+    ];
   }
-  function questions() {
-    stopClock();
-    const sources = [...new Set(st.cases.map((c) => c.source))];
-    const sel = h('select', { id: 'q-source' }, h('option', { value: '', text: 'All sources' }), sources.map((x) => h('option', { value: x, text: x })));
-    sel.value = st.source;
-    const list = h('div', { id: 'q-list' });
-    const done = doneIds();
+
+  /** Exam screen: no feedback, free navigation, marks. Grading happens on submit. */
+  /* ---- exam timer ---- */
+  let tickHandle = null;
+  function fmtClock(ms) {
+    const t = Math.max(0, Math.ceil(ms / 1000));
+    const hh = Math.floor(t / 3600); const mm = Math.floor((t % 3600) / 60); const ss = t % 60;
+    const p = (n) => String(n).padStart(2, '0');
+    return hh ? `${hh}:${p(mm)}:${p(ss)}` : `${p(mm)}:${p(ss)}`;
+  }
+  function stopTicker() { if (tickHandle) { clearInterval(tickHandle); tickHandle = null; } }
+  function startTicker() {
+    stopTicker();
+    tickHandle = setInterval(() => {
+      const sess = state.session;
+      if (state.machine !== 'ACTIVE' || !sess || !sess.limit || sess.submitted) { stopTicker(); return; }
+      const left = sess.endAt - Date.now();
+      const el = document.getElementById('exam-timer');
+      if (el) { el.textContent = fmtClock(left); el.classList.toggle('low', left <= 60000); }
+      if (left <= 0) { stopTicker(); submitExam(); }
+    }, 1000);
+  }
+
+  function viewActive() {
+    const s = state.session;
+    const q = currentQuestion();
+    const total = s.ids.length;
+    const chosen = s.answers[q.id];
+    const answeredCount = s.ids.filter((id) => s.answers[id] !== undefined).length;
+    const markedCount = s.ids.filter((id) => s.marked[id]).length;
+    const isMarked = Boolean(s.marked[q.id]);
+
+    const timerNode = s.limit ? h('span', { class: 'badge timer', id: 'exam-timer', role: 'timer', text: fmtClock(s.endAt - Date.now()) }) : null;
+    if (timerNode) startTicker(); else stopTicker();
+    const track = h('div', { class: 'bar thin', role: 'img', 'aria-label': `${answeredCount} of ${total} answered` });
+    const fill = h('span', { class: 'seg fill' });
+    fill.style.width = `${(answeredCount / total) * 100}%`;
+    track.append(fill);
+
+    const options = h('ul', { class: 'options' }, q.options.map((text, i) => h('li', {},
+      h('button', {
+        class: `option${chosen === i ? ' selected' : ''}`, type: 'button',
+        'data-i': i, 'aria-pressed': chosen === i ? 'true' : 'false',
+        on: { click: () => selectOption(i) },
+      },
+        h('span', { class: 'letter', text: letter(i) }),
+        h('span', {}, h('span', { text }), optionImage(q, i)),
+        chosen === i && h('span', { class: 'mark', 'aria-hidden': 'true', text: '●' })
+      )
+    )));
+
+    const navigator = h('div', { class: 'navgrid', role: 'group', 'aria-label': 'Question navigator' },
+      s.ids.map((id, i) => {
+        const answered = s.answers[id] !== undefined;
+        const marked = Boolean(s.marked[id]);
+        const status = marked ? 'marked' : answered ? 'answered' : 'unanswered';
+        const label = `Question ${i + 1}: ${answered ? 'answered' : 'unanswered'}${marked ? ', marked for review' : ''}`;
+        return h('button', {
+          class: `navbtn ${status}${i === s.index ? ' current' : ''}`, type: 'button',
+          title: label, 'aria-label': label, 'aria-current': i === s.index ? 'true' : null,
+          text: String(i + 1), on: { click: () => goTo(i) },
+        });
+      })
+    );
+    const navLegend = h('ul', { class: 'legend' },
+      h('li', {}, h('span', { class: 'dot unanswered' }), 'Unanswered'),
+      h('li', {}, h('span', { class: 'dot answered' }), 'Answered'),
+      h('li', {}, h('span', { class: 'dot marked' }), 'Marked for review')
+    );
+
+    const confirmSubmit = () => {
+      const unanswered = total - answeredCount;
+      const parts = ['Submit your exam now? You will not be able to change your answers.'];
+      if (unanswered) parts.push(`${unanswered} question(s) are unanswered.`);
+      if (markedCount) parts.push(`${markedCount} question(s) are still marked for review.`);
+      if (window.confirm(parts.join('\n'))) submitExam();
+    };
+
+    return [
+      h('section', { class: 'card' },
+        h('div', { class: 'q-head' },
+          h('span', { text: `Question ${s.index + 1} of ${total}` }),
+          timerNode,
+          h('span', { class: 'badge', text: labelOf(q) })
+        ),
+        track,
+        stemNodes(q),
+        options,
+        h('div', { class: 'row between form-actions' },
+          h('button', {
+            class: 'btn', type: 'button', id: 'prev', text: '← Previous',
+            disabled: s.index === 0, on: { click: () => goTo(s.index - 1) },
+          }),
+          h('button', {
+            class: `btn${isMarked ? ' marked-on' : ''}`, type: 'button', id: 'mark-btn',
+            'aria-pressed': isMarked ? 'true' : 'false',
+            text: isMarked ? 'Unmark review' : 'Mark for review', on: { click: toggleMark },
+          }),
+          h('button', {
+            class: 'btn', type: 'button', id: 'report-btn', 'aria-expanded': reportDraft.open && reportDraft.id === q.id ? 'true' : 'false',
+            text: reportedIds.has(q.id) ? 'Reported ✓' : 'Report', on: { click: toggleReport },
+          }),
+          h('button', {
+            class: 'btn', type: 'button', id: 'next', text: 'Next →',
+            disabled: s.index >= total - 1, on: { click: () => goTo(s.index + 1) },
+          })
+        ),
+        reportedIds.has(q.id) && !(reportDraft.open && reportDraft.id === q.id) && h('p', { class: 'muted', id: 'report-thanks', text: 'Thanks, your report was sent.' }),
+        reportDraft.open && reportDraft.id === q.id && reportPanel(q),
+        chosen !== undefined && h('div', { class: 'row' },
+          h('button', { class: 'btn link', type: 'button', id: 'clear-answer', text: 'Clear answer', on: { click: clearAnswer } }))
+      ),
+      h('section', { class: 'card' },
+        h('h2', { text: 'Questions' }),
+        navigator,
+        navLegend
+      ),
+      h('section', { class: 'card' },
+        h('p', {
+          id: 'exam-summary',
+          text: `Answered ${answeredCount} of ${total}${markedCount ? ` · ${markedCount} marked for review` : ''}`,
+        }),
+        h('div', { class: 'row between' },
+          h('button', {
+            class: 'btn link', type: 'button', id: 'quit', text: 'Quit without submitting',
+            on: { click: () => { if (window.confirm('Quit without submitting? Your answers for this exam will be discarded.')) leaveTest(); } },
+          }),
+          h('button', { class: 'btn primary', type: 'button', id: 'submit', text: 'Submit exam', on: { click: confirmSubmit } })
+        )
+      ),
+    ];
+  }
+
+  /** After a test: every question from the session, incorrect ones first and in red. */
+  /** One dropdown of review items with its own "show answers" checkbox. */
+  function reviewGroup(key, title, qs, answers, ids) {
+    const box = h('input', { id: `rv-${key}-reveal`, type: 'checkbox' });
+    const list = h('ul', { class: 'review', id: `rv-${key}-list` });
     const paint = () => {
-      st.source = sel.value;
-      list.replaceChildren(...st.cases.filter((c) => !sel.value || c.source === sel.value).map((c) => {
-        const d = h('details', { class: 'qd' }, h('summary', {}, h('span', { class: done.has(c.id) ? 'num acc' : 'num', text: `No. ${numOf(c)}` }), h('strong', { text: ` [${c.source}] ` }), c.title));
-        d.addEventListener('toggle', () => { if (d.open && !d.querySelector('.full')) d.append(fullCase(c), isAdmin() ? adminCaseControl(c, paint) : null, caseReportControl(c)); }); // built on first open: keeps the page light
-        return d;
-      }));
+      const reveal = box.checked;
+      list.replaceChildren(...(qs.length ? qs.map((q) => {
+        const chosen = answers[q.id];
+        const answered = chosen !== undefined;
+        const wrong = answered && chosen !== q.correctIndex;
+        return h('li', { class: `review-item${reveal && wrong ? ' wrong' : ''}` },
+          h('div', { class: 'q-head' }, h('span', { text: `Question ${ids.indexOf(q.id) + 1} · ${labelOf(q)}` })),
+          stemNodes(q),
+          staticOptions(q, chosen, reveal),
+          reveal && aiNote(q),
+          reveal && wrong && h('p', { class: 'your-answer', text: `Your answer: ${letter(chosen)}. ${q.options[chosen]}` }),
+          reveal && explanationNode(q, true),
+          reveal && questionReports(q),
+          reportControl(q)
+        );
+      }) : [h('li', { class: 'muted', text: 'None.' })]));
     };
-    sel.addEventListener('change', paint); paint();
-    mount(tabBar('all'), h('div', { class: 'row' }, h('button', { class: 'btn', id: 'back', text: '← Back', on: { click: home } })),
-      h('section', { class: 'card' }, h('h2', { text: 'All questions' }),
-        h('p', { class: 'muted', text: 'Tap a case to see everything: scenario, physical examination, anamnesis, test results, explanations, diagnosis, prescription and more.' }),
-        h('div', { class: 'sel' }, h('label', { for: 'q-source', text: 'Source:' }), sel), list));
+    box.addEventListener('change', guard(paint));
+    paint();
+    return h('div', { class: 'review-group', id: `rv-${key}` },
+      h('div', { class: 'group-bar' },
+        h('details', { class: 'group', open: key === 'incorrect' && qs.length > 0 },
+          h('summary', { text: `${title} (${qs.length})` }), list),
+        h('label', { class: 'inline-check group-check', for: `rv-${key}-reveal` }, box, 'Show answers & explanation')));
   }
 
-  /* ---- history of finished sessions ---- */
-  const entryView = (e) => { const c = st.byId.get(e.id); return c ? [finishedCard(c, e), assessCard(e), extraCard(e), resultsCard(c, e, false)] : [missing(e)]; };
-  function history() {
-    stopClock();
-    const all = loadHist();
-    const items = all.slice().reverse();
-    const del = (e) => { if (window.confirm(`Delete this session (${e.name}, ${when(e.t)})?`)) { saveHist(loadHist().filter((x) => x.t !== e.t)); history(); } };
-    mount(h('div', { class: 'row' }, h('button', { class: 'btn', id: 'back', text: '← Back', on: { click: home } })),
-      h('section', { class: 'card' }, h('h2', { text: `History (${all.length})` }),
-        items.length ? [
-          h('div', { class: 'row' },
-            h('button', { class: 'btn primary', id: 'pdf-all', text: 'Save all as PDF', on: { click: () => printView(items) } }),
-            h('button', { class: 'btn', id: 'reports', text: 'Participant reports', on: { click: reports } }),
-            h('button', { class: 'btn', id: 'clear', text: 'Delete all', on: { click: () => { if (window.confirm('Delete the whole history?')) { saveHist([]); history(); } } } })),
-          items.map((e) => { const c = st.byId.get(e.id); return h('div', { class: 'li hist-item' },
-            h('div', {}, h('strong', { text: e.name }), h('div', { class: 'muted', text: `${when(e.t)} · ${c ? `No. ${numOf(c)} · [${c.source}] ${c.title}` : 'case no longer available'}` })),
-            h('div', { class: 'row' },
-              h('button', { class: 'btn', text: 'View', on: { click: () => histView(e) } }),
-              h('button', { class: 'btn', text: 'Save PDF', on: { click: () => printView([e]) } }),
-              h('button', { class: 'btn', text: 'Delete', on: { click: () => del(e) } }))); }),
-        ] : h('p', { class: 'muted', text: 'No finished sessions yet. A session is saved when you press Finish.' })));
-  }
-  function histView(e) {
-    mount(h('div', { class: 'row noprint' }, h('button', { class: 'btn', id: 'back', text: '← Back to history', on: { click: history } }),
-      h('button', { class: 'btn primary', id: 'pdf', text: 'Save as PDF', on: { click: doPrint } })), entryView(e));
-  }
-  /** One or many sessions on a printable page; the browser's print dialog offers “Save as PDF”. */
-  const printView = (entries) => printBlocks(entries.map(entryView));
-  function printBlocks(blocks) {
-    mount(h('div', { class: 'row noprint' }, h('button', { class: 'btn', id: 'back', text: '← Back to history', on: { click: history } }),
-      h('button', { class: 'btn primary', id: 'pdf', text: 'Print / Save as PDF', on: { click: doPrint } }),
-      h('span', { class: 'muted', text: 'In the print dialog, choose “Save as PDF” as the destination.' })),
-      blocks.map((b) => h('div', { class: 'entry' }, b)));
-    setTimeout(doPrint, 400);
+  function reviewSection(ids, answers, hideUnanswered = false) {
+    const items = ids.map((id) => state.byId.get(id)).filter(Boolean);
+    const rank = (q) => (answers[q.id] === undefined ? 1 : answers[q.id] === q.correctIndex ? 2 : 0);
+    const ordered = items
+      .map((q, i) => ({ q, i }))
+      .sort((a, b) => rank(a.q) - rank(b.q) || a.i - b.i)
+      .map((x) => x.q);
+    return h('section', {},
+      h('h2', { text: `Review all ${items.length} questions` }),
+      h('p', { class: 'muted', text: 'Open a group to see its questions. Tick the box next to it to show the correct answers and explanations.' }),
+      reviewGroup('incorrect', 'Answered incorrectly', ordered.filter((q) => rank(q) === 0), answers, ids),
+      reviewGroup('correct', 'Answered correctly', ordered.filter((q) => rank(q) === 2), answers, ids),
+      !hideUnanswered && reviewGroup('unanswered', 'Unanswered', ordered.filter((q) => rank(q) === 1), answers, ids));
   }
 
-  /* ---- load / login ---- */
-  const validCase = (c) => c && typeof c.id === 'string' && c.brief && Array.isArray(c.anamnesis) && Array.isArray(c.tests);
-  async function load() {
-    mount(h('section', { class: 'card' }, h('p', { class: 'muted', text: 'Loading…' })));
+  function histScore(e) {
+    let correct = 0; let known = 0;
+    e.ids.forEach((id, i) => {
+      const q = state.byId.get(id);
+      if (!q) return;
+      known++;
+      if (e.a[i] === q.correctIndex) correct++;
+    });
+    return { correct, known };
+  }
+
+  function viewHistory() {
+    const back = backButton();
+    const sel = state.ui.histIndex;
+    if (Number.isInteger(sel) && state.history[sel]) {
+      const e = state.history[sel];
+      const answers = Object.create(null);
+      e.ids.forEach((id, i) => { if (e.a[i] >= 0) answers[id] = e.a[i]; });
+      const { correct, known } = histScore(e);
+      return [
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', type: 'button', id: 'hist-back', text: '← History',
+            on: { click: () => { state.ui.histIndex = null; render(); } } })),
+        h('section', { class: 'card' },
+          h('h2', { text: new Date(e.t).toLocaleString() }),
+          h('p', { class: 'big', id: 'hist-score', text: `${correct} / ${known} correct (${pct(correct, known)}%)` }),
+          known < e.ids.length && h('p', { class: 'muted', text: `${e.ids.length - known} question(s) no longer exist in the bank.` }),
+          h('div', { class: 'form-actions' },
+            h('button', { class: 'btn primary', type: 'button', id: 'hist-retake', text: 'Retake same questions',
+              on: { click: () => startFromIds(e.ids) } }))),
+        tinjauanSection(e.ids.map((id) => state.byId.get(id)).filter(Boolean), answers),
+        reviewSection(e.ids, answers, true),
+      ];
+    }
+    const rows = tabHistory().reverse().map(({ e, i }) => {
+      const { correct, known } = histScore(e);
+      return h('li', { class: 'hist-item' },
+        h('div', {},
+          h('strong', { text: new Date(e.t).toLocaleString() }),
+          h('span', { class: 'muted', text: ` · ${correct} / ${known} correct (${pct(correct, known)}%)` })),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', type: 'button', text: 'Details', on: { click: () => { state.ui.histIndex = i; render(); } } }),
+          h('button', { class: 'btn primary', type: 'button', text: 'Retake', on: { click: () => startFromIds(e.ids) } })));
+    });
+    return [
+      back,
+      h('section', { class: 'card', id: 'history' },
+        h('h2', { text: 'Exam history' }),
+        h('p', { class: 'muted', text: `Last ${HISTORY_MAX} completed exams are kept in this browser; only answered questions are saved. Scores use the current answer keys.` }),
+        h('ul', { class: 'hist-list' }, rows.length ? rows : [h('li', { class: 'muted', text: 'No completed exams yet.' })]),
+        state.history.length ? h('div', { class: 'form-actions' },
+          h('button', { class: 'btn danger', type: 'button', id: 'hist-clear', text: 'Clear history',
+            on: { click: () => { if (window.confirm('Delete all exam history? Progress is not affected.')) { state.history = []; saveHistory(); render(); } } } })) : null),
+    ];
+  }
+
+  function viewResults() {
+    const { ids, answers } = state.session;
+    const items = ids.map((id) => state.byId.get(id));
+    const rank = (q) => (answers[q.id] === undefined ? 1 : answers[q.id] === q.correctIndex ? 2 : 0);
+    const ordered = items
+      .map((q, i) => ({ q, i }))
+      .sort((a, b) => rank(a.q) - rank(b.q) || a.i - b.i)
+      .map((x) => x.q);
+    const correct = items.filter((q) => rank(q) === 2).length;
+    const wrong = items.filter((q) => rank(q) === 0).length;
+    const skipped = items.filter((q) => rank(q) === 1).length;
+
+    return [
+      h('section', { class: 'card' },
+        h('h2', { text: 'Results' }),
+        h('p', { class: 'big', id: 'score', text: `${correct} / ${items.length} correct (${pct(correct, items.length)}%)` }),
+        h('p', { class: 'muted', id: 'score-detail',
+          text: `${wrong} incorrect${skipped ? `, ${skipped} unanswered` : ''}. Incorrect questions stay in the pool for your next tests.${skipped ? ' Unanswered questions keep their previous status.' : ''}` }),
+        h('div', { class: 'form-actions' },
+          h('button', { class: 'btn primary', type: 'button', id: 'done', text: 'Back to menu', on: { click: leaveTest } }),
+          h('button', { class: 'btn', type: 'button', id: 'retake', text: 'Retake same questions', on: { click: retakeFromResults } }))
+      ),
+      tinjauanSection(items, answers),
+      reviewSection(ids, answers),
+    ];
+  }
+
+  /* ======================================================================
+   * Render
+   * ==================================================================== */
+  function render(focusSel) {
     try {
-      const env = await fetchEnvelope();
-      const data = await decryptData(env, st.key);
-      st.baseCases = (data.cases || []).filter(validCase);
-      if (!st.baseCases.length) throw new DataError(`${DATA_URL} has no valid cases.`);
-      st.user = loadUser();
-      if (st.user) await Promise.race([loadRemote(true), new Promise((res) => setTimeout(res, 3500))]);
-      st.cases = st.baseCases.map(remoteOf);
-      st.byId = new Map(st.cases.map((c) => [c.id, c]));
-      if (st.user) { registry.sync(); setTimeout(prefetchReports, 1500); home(); } else userStage(home, false);
+      if (state.machine !== 'SETUP' || state.ui.panel !== 'manage') refs.notice = null;
+      switch (state.machine) {
+        case 'INIT':
+        case 'LOADING': mount(viewLoading()); break;
+        case 'ERROR': mount(viewError()); break;
+        case 'SETUP': mount(viewSetup()); break;
+        case 'ACTIVE': mount(viewActive()); break;
+        case 'RESULTS': mount(viewResults()); break;
+        default: throw new Error(`Unknown state ${state.machine}`);
+      }
+      if (state.user && REGISTRY_URL && state.machine !== 'INIT' && state.machine !== 'LOADING') { renderBell(); prefetchReports(); }
+      if (focusSel) {
+        const el = app.querySelector(focusSel);
+        if (el) el.focus();
+      }
     } catch (err) {
-      if (err instanceof AuthError) { showLogin(); return; }
-      mount(h('section', { class: 'card' }, h('h2', { text: 'Could not load cases' }), h('p', { text: err instanceof DataError ? err.message : 'Unexpected error.' }),
-        h('div', { class: 'row' }, h('button', { class: 'btn primary', text: 'Retry', on: { click: load } }))));
+      console.error(err);
+      renderFatal();
     }
   }
-  function showLogin() { st.key = null; sess.clear(); mount(viewLogin()); }
+
+  /** Last-resort screen that does not depend on app state. */
+  function renderFatal() {
+    app.replaceChildren(
+      h('section', { class: 'card' },
+        h('h2', { text: 'Something went wrong' }),
+        h('p', { text: 'An unexpected error occurred. Reload the page to continue. Your saved progress is not affected.' }),
+        h('button', { class: 'btn primary', type: 'button', text: 'Reload', on: { click: () => window.location.reload() } })
+      )
+    );
+  }
+
+  function showNamePage(done) {
+    mount([viewName(done, state.machine === 'SETUP')]);
+    registry.count();
+  }
+
+  const UNIVERSITIES = ['IPB', 'UB', 'UGM', 'UNAIR', 'UNDANA', 'UNHAS', 'UNPAD', 'UNUD', 'USK', 'Other'];
+  function viewName(done, canCancel) {
+    const err = h('p', { class: 'notice err', role: 'alert', hidden: true });
+    const name = h('input', { id: 'user-name', type: 'text', maxlength: '60', autocomplete: 'name', value: state.user ? state.user.name : '' });
+    const uni = h('input', { id: 'user-uni', type: 'text', maxlength: '80', list: 'uni-list', autocomplete: 'organization', value: state.user ? state.user.university || '' : '' });
+    const list = h('datalist', { id: 'uni-list' }, UNIVERSITIES.map((u) => h('option', { value: u })));
+    const count = h('p', { class: 'muted', id: 'participants', text: participantsText() });
+    const btn = h('button', { class: 'btn primary', type: 'submit', id: 'name-btn', text: 'Continue' });
+    return h('form', {
+      class: 'card', id: 'name-form', novalidate: true,
+      on: {
+        submit: (e) => {
+          e.preventDefault();
+          const v = name.value.replace(/\s+/g, ' ').trim();
+          const u = uni.value.replace(/\s+/g, ' ').trim();
+          if (v.length < 2) { err.hidden = false; err.textContent = 'Enter your name (at least 2 characters).'; name.focus(); return; }
+          if (u.length < 2) { err.hidden = false; err.textContent = 'Enter your university (at least 2 characters).'; uni.focus(); return; }
+          state.user = { id: state.user ? state.user.id : newDeviceId(), name: v.slice(0, 60), university: u.slice(0, 80) };
+          storage.write(KEYS.user, state.user);
+          done();
+        },
+      },
+    },
+      h('h2', { text: 'Who are you?' }),
+      h('p', { class: 'muted', text: 'Your name and university are recorded so the admin knows who has used Quiz Time.' }),
+      h('label', { for: 'user-name', text: 'Name' }), name,
+      h('label', { for: 'user-uni', text: 'University' }), uni, list,
+      err,
+      h('div', { class: 'form-actions' }, btn, canCancel && h('button', { class: 'btn', type: 'button', id: 'name-cancel', text: 'Cancel', on: { click: () => render() } })),
+      count);
+  }
+
+  /** After a successful login: ask for a name once per browser, then start. */
+  function proceed() {
+    state.user = loadUser();
+    if (state.user && state.user.university) boot(); else showNamePage(boot);
+  }
+
+  function showLogin() {
+    state.key = null;
+    sess.clear();
+    state.machine = 'INIT';
+    mount(viewLogin());
+  }
+
   function viewLogin() {
     const err = h('p', { class: 'notice err', role: 'alert', hidden: true });
     const id = h('input', { id: 'login-id', type: 'text', autocomplete: 'username', autocapitalize: 'none', spellcheck: 'false' });
     const pw = h('input', { id: 'login-pw', type: 'password', autocomplete: 'current-password' });
     const btn = h('button', { class: 'btn primary', type: 'submit', id: 'login-btn', text: 'Log in' });
     const fail = (msg) => { err.hidden = false; err.textContent = msg; pw.value = ''; btn.disabled = false; btn.textContent = 'Log in'; pw.focus(); };
-    return h('form', {
+    return [h('form', {
       class: 'card', id: 'login-form', novalidate: true,
       on: {
         submit: async (e) => {
-          e.preventDefault(); err.hidden = true; btn.disabled = true; btn.textContent = 'Checking…';
+          e.preventDefault();
+          err.hidden = true;
+          btn.disabled = true;
+          btn.textContent = 'Checking…';
           try {
             const env = await fetchEnvelope();
             const key = await deriveKey(id.value, pw.value, env);
-            await decryptData(env, key); // throws AuthError when the ID/password is wrong
-            st.key = key;
+            await decryptBank(env, key); // throws AuthError when the ID/password is wrong
+            state.key = key;
             sess.set(b64e(new Uint8Array(await crypto.subtle.exportKey('raw', key))));
-            load();
+            proceed();
           } catch (ex) {
             if (ex instanceof AuthError) fail('Wrong ID or password.');
             else fail(ex instanceof DataError ? ex.message : 'Something went wrong. Please try again.');
@@ -1394,16 +2755,16 @@
       h('label', { for: 'login-id', text: 'ID' }), id,
       h('label', { for: 'login-pw', text: 'Password' }), pw,
       err,
-      h('div', { class: 'row' }, btn),
-      h('p', { class: 'muted thanks', text: 'Thanks to: Allah SWT, Claude AI, and every question bank that went into my chat.' }));
+      h('div', { class: 'form-actions' }, btn),
+      h('p', { class: 'muted thanks', text: 'Thanks to: Allah SWT, Claude AI, and every question bank that went into my chat.' })
+    )];
   }
-
-  window.OSCE_API = { h, mount, st, resultBody, scenario, lines, numOf, home, caseReportControl };
 
   (async () => {
     const saved = sess.get();
     if (saved) {
-      try { st.key = await importKey(saved); load(); return; } catch (_) { sess.clear(); }
+      try { state.key = await importKey(saved); proceed(); return; }
+      catch (_) { sess.clear(); }
     }
     mount(viewLogin());
   })();
