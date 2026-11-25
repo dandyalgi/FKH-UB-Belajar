@@ -12,6 +12,9 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-25', items: [
+      'Reply to a comment: tap “↩ Reply” under any comment. The person you reply to is tagged and gets a notification in the 🔔 list.',
+      'Fixed: the 🔔 button now shows right after you sign in, without opening Reports & Discussion first.',
+      'Added 475 questions from TO NAS November 2026: FIKKIA (73), UNUD (95), USK (93) and UB (214). They also show up in Fokus UKMPPDH.',
       'New "Reports & Discussion" tab (top bar, next to Fokus UKMPPDH): see all question reports sent by everyone in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, and compare the reported version with the current answer key. You can give a thumbs up or down and comment on any report (comments show your name). A 🔔 button at the top right lists new thumbs up/down and comments on your own reports; tap one to open that thread. Reports for a question also appear under its explanation in the review after a test and in Browse ("Reports & discussion").',
     ] },
     { date: '2026-11-22', items: [
@@ -1730,27 +1733,37 @@
     const btn = (v, label, n, id) => h('button', { class: `btn${(r.mine || 0) === v ? ' primary' : ''}`, type: 'button', id, 'aria-pressed': String((r.mine || 0) === v), text: `${label} ${n || 0}`, on: { click: () => cast(v) } });
     return h('div', { class: 'row' }, btn(1, '👍', r.up, `${pre}-up`), btn(-1, '👎', r.down, `${pre}-down`));
   }
+  /** A reply starts with @[Name (University)] followed by the text. */
+  function replyOf(text) {
+    const m = /^@\[([^\]]{2,140}(?:\([^)]*\))?)\]\s?/.exec(text || '');
+    return m ? { to: m[1], text: (text || '').slice(m[0].length) } : { to: '', text: text || '' };
+  }
   function commentBox(r, st, paint, pre = 'rp') {
-    const ta = h('textarea', { id: `${pre}-ctext`, rows: '3', maxlength: '1000', placeholder: 'Write a comment…',
+    const ta = h('textarea', { id: `${pre}-ctext`, rows: '3', maxlength: '800', placeholder: 'Write a comment…',
       on: { input: (ev) => { st.draft = ev.target.value; } } });
     ta.value = st.draft || '';
     const send = async () => {
-      const text = (st.draft || '').trim();
-      if (text.length < 2 || !state.user || st.sending) return;
+      const body = (st.draft || '').trim();
+      if (body.length < 2 || !state.user || st.sending) return;
+      const text = st.replyTo ? `@[${st.replyTo}] ${body}` : body;
       st.sending = true;
       const name = `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}`;
       const res = await post({ action: 'rcomment', id: r.id, name, text });
       st.sending = false;
       if (!res) { st.msg = 'Could not send the comment. Try again.'; paint(); return; }
       (r.comments || (r.comments = [])).push({ t: Date.now(), name, text });
-      st.draft = ''; st.msg = ''; paint();
+      st.draft = ''; st.msg = ''; st.replyTo = ''; paint();
     };
+    const me = myLabel();
     return h('div', { id: `${pre}-comments` },
       h('h3', { text: `Comments (${(r.comments || []).length})` }),
       h('ul', { class: 'hist-list' }, (r.comments || []).length
-        ? r.comments.map((c) => h('li', { class: 'hist-item' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })), h('p', { class: 'prewrap', text: c.text })))
+        ? r.comments.map((c) => { const rp = replyOf(c.text); return h('li', { class: 'hist-item' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
+          h('p', { class: 'prewrap' }, rp.to && h('span', { class: `mention${rp.to === me ? ' me' : ''}`, text: `@${rp.to}` }), rp.to && ' ', rp.text),
+          c.name !== me && h('button', { class: 'btn reply-btn', type: 'button', text: '↩ Reply', on: { click: () => { st.replyTo = c.name; paint(); const t = document.getElementById(`${pre}-ctext`); if (t) t.focus(); } } })); })
         : [h('li', { class: 'muted', text: 'No comments yet.' })]),
       st.msg && h('p', { class: 'notice err', role: 'alert', text: st.msg }),
+      st.replyTo && h('p', { class: 'muted reply-to' }, `Replying to ${st.replyTo} `, h('button', { class: 'btn', type: 'button', text: '✕', 'aria-label': 'Cancel reply', on: { click: () => { st.replyTo = ''; paint(); } } })),
       ta, h('div', { class: 'form-actions' }, h('button', { class: 'btn primary', type: 'button', id: `${pre}-csend`, text: 'Send comment', on: { click: send } })));
   }
   let reportsCache = null; // { list } | { error } | { loading }
@@ -1761,7 +1774,8 @@
   const isMine = (r, me) => (r.dev ? r.own : r.by === me);
   const seenMap = () => { const m = storage.read(KEYS.repseen, {}); return m && typeof m === 'object' ? m : {}; };
   const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)),
-    c: (r.comments || []).filter((c) => c.name !== myLabel()).length });
+    c: (r.comments || []).filter((c) => c.name !== myLabel()).length,
+    m: (r.comments || []).filter((c) => c.name !== myLabel() && replyOf(c.text).to === myLabel()).length });
   /** New activity on each of my reports: { [id]: { up, down, c } } with only positive differences. */
   function freshActivity() {
     const out = {};
@@ -1769,18 +1783,24 @@
     const seen = seenMap(); const me = myLabel();
     for (const r of reportsCache.list) {
       if (!isMine(r, me)) continue;
-      const o = othersOf(r); const s = seen[r.id] || { up: 0, down: 0, c: 0 };
-      const d = { up: Math.max(0, o.up - s.up), down: Math.max(0, o.down - s.down), c: Math.max(0, o.c - s.c) };
+      const o = othersOf(r); const s = seen[r.id] || { up: 0, down: 0, c: 0, m: 0 };
+      const d = { up: Math.max(0, o.up - s.up), down: Math.max(0, o.down - s.down), c: Math.max(0, o.c - s.c), m: 0 };
       if (d.c) d.items = (r.comments || []).filter((c) => c.name !== me).slice(-d.c);
-      if (d.up || d.down || d.c) { d.code = r.code; out[r.id] = d; }
+      if (d.up || d.down || d.c) { d.code = r.code; d.mine = true; out[r.id] = d; }
+    }
+    for (const r of reportsCache.list) {
+      if (isMine(r, me)) continue;
+      const o = othersOf(r); const s = seen[r.id] || { m: 0 };
+      const m = Math.max(0, o.m - (s.m || 0));
+      if (m) { const ms = (r.comments || []).filter((c) => c.name !== me && replyOf(c.text).to === me).slice(-m); out[r.id] = { up: 0, down: 0, c: 0, m, items: ms, code: r.code, mine: false }; }
     }
     return out;
   }
-  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c, 0);
+  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m, 0);
   function markSeen(onlyId) {
     if (!reportsCache || !reportsCache.list) return;
     const seen = seenMap(); const me = myLabel();
-    for (const r of reportsCache.list) if (isMine(r, me) && (!onlyId || r.id === onlyId)) seen[r.id] = othersOf(r);
+    for (const r of reportsCache.list) { const o = othersOf(r); if ((isMine(r, me) || o.m) && (!onlyId || r.id === onlyId)) seen[r.id] = o; }
     storage.write(KEYS.repseen, seen);
     renderBell();
   }
@@ -1789,6 +1809,7 @@
   async function prefetchReports() {
     if (prefetched || !REGISTRY_URL || !state.user) return;
     prefetched = true;
+    renderBell();
     if (!reportsCache) { const list = await registry.reports(); reportsCache = list ? { list } : null; }
     renderBell();
     if (freshCount() && state.machine === 'SETUP' && state.tab !== 'reports') render();
@@ -1796,6 +1817,7 @@
       if (document.hidden) return;
       const list = await registry.reports();
       if (list && state.tab !== 'reports') { reportsCache = { list }; renderBell(); }
+      else if (!list) renderBell();
     }, 90000);
   }
   /* ---- bell (top right): list of new thumbs up/down and comments on my reports; a click opens that thread ---- */
@@ -1804,7 +1826,7 @@
     if (!REGISTRY_URL || !state.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
     if (!bellEl) { bellEl = h('div', { class: 'bell', id: 'bell' }); document.body.append(bellEl); }
     const fa = freshActivity(); const ids = Object.keys(fa);
-    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c, 0);
+    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m, 0);
     const kids = [h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
       on: { click: () => { bellOpen = !bellOpen; renderBell(); } } })];
     if (bellOpen) {
@@ -1814,9 +1836,9 @@
         ids.length ? ids.map((id) => {
           const d = fa[id];
           return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
-            h('strong', { text: `Your report on ${d.code}` }),
+            h('strong', { text: d.mine ? `Your report on ${d.code}` : `Reply to you on ${d.code}` }),
             [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).length ? h('span', { class: 'muted', text: [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ') }) : null,
-            (d.items || []).map((c) => h('span', { class: 'muted', text: `💬 ${c.name}: ${c.text.length > 90 ? `${c.text.slice(0, 90)}…` : c.text}` })));
+            (d.items || []).map((c) => { const t = replyOf(c.text).text; return h('span', { class: 'muted', text: `💬 ${c.name}${replyOf(c.text).to === myLabel() ? ' replied to you' : ''}: ${t.length > 90 ? `${t.slice(0, 90)}…` : t}` }); }));
         }) : h('p', { class: 'muted', text: 'No new notifications.' })));
     }
     bellEl.replaceChildren(...kids);
@@ -2387,6 +2409,7 @@
         case 'RESULTS': mount(viewResults()); break;
         default: throw new Error(`Unknown state ${state.machine}`);
       }
+      if (state.user && REGISTRY_URL && state.machine !== 'INIT' && state.machine !== 'LOADING') { renderBell(); prefetchReports(); }
       if (focusSel) {
         const el = app.querySelector(focusSel);
         if (el) el.focus();

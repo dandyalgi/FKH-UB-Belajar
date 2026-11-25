@@ -354,3 +354,7 @@ textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; bor
 .bell-item { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; font: inherit; padding: 8px; margin-top: 6px; border: 1px solid var(--border, #d0d7de); border-radius: 8px; background: none; color: inherit; cursor: pointer; }
 .bell-item:hover, .bell-item:focus-visible { outline: 2px solid var(--accent, #2563eb); }
 .rq-item.flash { animation: flash 2.5s ease-out; } @keyframes flash { from { box-shadow: 0 0 0 3px var(--accent, #2563eb); } to { box-shadow: 0 0 0 0 transparent; } }
+.mention { font-weight: 700; color: var(--accent, #2563eb); }
+.mention.me { background: rgba(250, 204, 21, .35); border-radius: 4px; padding: 0 3px; }
+.reply-btn { font-size: .8rem; padding: 2px 8px; margin-top: 2px; }
+.reply-to { margin: 6px 0 2px; }
