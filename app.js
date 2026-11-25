@@ -12,6 +12,7 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-25', items: [
+      'Lighter on the server: the Reports list and admin edits are only downloaded again when they changed, checks run every few minutes and only while the tab is open, and votes or comments that fail to send are kept on your device and retried automatically.',
       'Removed personal answer-key editing for regular users: only admins can edit, and their edits apply to everyone. The notification to a reporter now reads “Admin fixed this question’s answer”. Added contributor Averoes Gibraltar Makta.',
       'The Admin mode switch is now at the top right, next to the 🔔, on every screen. Notifications are split in two: General (votes, comments, replies to you, and when an admin fixes a question you reported) and Admin (new report threads, admins only).',
       'Admins now have an “Admin mode” switch (under the tabs, remembered on this device) to show or hide all admin tools. Report status filter: All, Open, Closed (visible to everyone) and Deleted (admins only).',
@@ -464,9 +465,16 @@
       const data = await this.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ id: state.user.id, name: state.user.name, university: state.user.university || '' }) });
       if (data && Number.isInteger(data.count)) setParticipants(data.count);
     },
+    /** The server answers {unchanged:true} when the shared list has not changed since our token: then we keep the list we already hold. */
+    rv: '', ra: '', rl: null,
     async reports() {
-      const data = await this.call({ method: 'GET' }, `action=reports&device=${encodeURIComponent(state.user ? state.user.id : '')}`);
-      return data && Array.isArray(data.reports) ? data.reports : null;
+      const since = this.rv && this.rl ? `&since=${encodeURIComponent(this.rv)}&adm=${this.ra}` : '';
+      const data = await this.call({ method: 'GET' }, `action=reports&device=${encodeURIComponent(state.user ? state.user.id : '')}${since}`);
+      if (!data) return null;
+      if (data.unchanged && this.rl) return this.rl;
+      if (!Array.isArray(data.reports)) return null;
+      this.rv = typeof data.v === 'string' ? data.v : ''; this.ra = data.admin ? '1' : '0'; this.rl = data.reports;
+      return data.reports;
     },
     async count() {
       const data = await this.call({ method: 'GET' });
@@ -483,7 +491,7 @@
 
 
   /* ---- shared admin edits (stored ENCRYPTED in the sheet), admin flag and edit history ---- */
-  const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '' };
+  const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '', ev: '' };
   let adminFlag = false;
   let editingOpen = false;
   let adminOn = true;
@@ -514,8 +522,14 @@
   /** One call: am I an admin, and every edit so far. `quiet`: the caller applies the result itself (start-up). */
   async function loadRemote(force, quiet) {
     if (!REGISTRY_URL || !state.user || !state.key) return false;
-    const data = await registry.call({ method: 'GET' }, `action=boot&device=${encodeURIComponent(state.user.id)}&app=quiz`);
+    const since = !force && remote.ev && remote.sig ? `&since=${encodeURIComponent(remote.ev)}` : '';
+    const data = await registry.call({ method: 'GET' }, `action=boot&device=${encodeURIComponent(state.user.id)}&app=quiz${since}`);
     if (!data) return false;
+    if (data.unchanged && remote.sig) {
+      const was = adminFlag; adminFlag = data.admin === true;
+      if (was !== adminFlag) { renderBell(); if (!quiet && state.machine === 'SETUP' && !editingOpen) render(); }
+      return true;
+    }
     const rows = (Array.isArray(data.edits) ? data.edits : []).filter((r) => r && typeof r.item === 'string' && Number.isInteger(r.rev) && typeof r.p === 'string')
       .sort((x, y) => (x.item < y.item ? -1 : x.item > y.item ? 1 : x.rev - y.rev));
     const sig = `${data.admin ? 1 : 0}:${rows.length}:${rows.reduce((m, r) => Math.max(m, r.t || 0), 0)}`;
@@ -532,7 +546,7 @@
     });
     const wasAdmin = adminFlag;
     adminFlag = data.admin === true;
-    Object.assign(remote, { cur, rev, hist, sig });
+    Object.assign(remote, { cur, rev, hist, sig, ev: typeof data.ev === 'string' ? data.ev : '' });
     if (!quiet) {
       applyRemoteChange();
       if (wasAdmin !== adminFlag && state.machine === 'SETUP' && !editingOpen) render();
@@ -733,7 +747,7 @@
       state.progress = loadProgress();
       state.session = loadSession();
       registry.sync();
-      setTimeout(() => prefetchReports(), 1500);
+      setTimeout(() => { prefetchReports(); flushOutbox().catch(() => {}); }, 1500 + Math.random() * 4000);
       state.history = loadHistory();
       recomputeProgress();
       state.tab = storage.read(KEYS.tab, 'all') === 'focus' ? 'focus' : 'all';
@@ -1771,7 +1785,7 @@
       if (!state.user || r.busy) return;
       const prev = r.mine || 0; const next = prev === v ? 0 : v;
       r.busy = true;
-      const res = await post({ action: 'rvote', id: r.id, device: state.user.id, vote: next });
+      const res = await postQueued({ action: 'rvote', id: r.id, device: state.user.id, vote: next });
       r.busy = false;
       if (!res) { st.msg = 'Could not save your vote. Try again.'; paint(); return; }
       if (prev > 0) r.up = Math.max(0, (r.up || 0) - 1); if (prev < 0) r.down = Math.max(0, (r.down || 0) - 1);
@@ -1796,7 +1810,7 @@
       const text = st.replyTo ? `@[${st.replyTo}] ${body}` : body;
       st.sending = true;
       const name = `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}`;
-      const res = await post({ action: 'rcomment', id: r.id, name, text });
+      const res = await postQueued({ action: 'rcomment', id: r.id, name, text, nonce: newDeviceId().replace(/[^A-Za-z0-9-]/g, '').slice(0, 36) });
       st.sending = false;
       if (!res) { st.msg = 'Could not send the comment. Try again.'; paint(); return; }
       (r.comments || (r.comments = [])).push({ t: Date.now(), name, text });
@@ -1867,13 +1881,59 @@
     if (!reportsCache) { const list = await registry.reports(); reportsCache = list ? { list } : null; }
     renderBell();
     if (freshCount() && state.machine === 'SETUP' && state.tab !== 'reports') render();
-    setInterval(async () => {
-      if (document.hidden) return;
-      const list = await registry.reports();
-      if (list && state.tab !== 'reports') { reportsCache = { list }; renderBell(); }
-      else if (!list) renderBell();
-      if (state.machine === 'SETUP' && !editingOpen) loadRemote(false).catch(() => {});
-    }, 90000);
+    // Gentle polling: only while the tab is visible, every 3 minutes (1 minute on the Reports tab) plus a random offset,
+    // and exponentially slower after failures, so thousands of open tabs never hit the server at the same moment.
+    let fails = 0; let last = Date.now();
+    const poll = async () => {
+      last = Date.now();
+      let ok = true;
+      try {
+        flushOutbox().catch(() => {});
+        const list = await registry.reports();
+        if (list && state.tab !== 'reports') { reportsCache = { list }; renderBell(); }
+        else if (!list) { ok = false; renderBell(); }
+        if (state.machine === 'SETUP' && !editingOpen) loadRemote(false).catch(() => {});
+      } catch (_) { ok = false; }
+      fails = ok ? 0 : Math.min(fails + 1, 4);
+      schedule();
+    };
+    const schedule = () => {
+      const base = (state.tab === 'reports' ? 60000 : 180000) * (2 ** fails);
+      setTimeout(() => { if (document.hidden) { schedule(); return; } poll(); }, Math.min(base, 900000) + Math.random() * 15000);
+    };
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - last > 120000) poll(); });
+    schedule();
+  }
+  /* ---- outbox: votes and comments that could not be sent are kept on this device and retried later (no duplicate comments: the server ignores a repeated nonce) ---- */
+  const OUTBOX = 'quiz.outbox.v1';
+  let flushing = false;
+  async function postQueued(body) {
+    const res = await post(body);
+    if (res) return res;
+    let q = storage.read(OUTBOX, []);
+    if (!Array.isArray(q)) q = [];
+    if (body.action === 'rvote') q = q.filter((x) => !(x.b && x.b.action === 'rvote' && x.b.id === body.id && x.b.device === body.device));
+    if (q.length < 50) q.push({ b: body, n: 0 });
+    storage.write(OUTBOX, q);
+    return { ok: true, queued: true };
+  }
+  async function flushOutbox() {
+    if (flushing || !REGISTRY_URL) return;
+    const q = storage.read(OUTBOX, []);
+    if (!Array.isArray(q) || !q.length) return;
+    flushing = true;
+    storage.write(OUTBOX, []);
+    const keep = [];
+    try {
+      for (let i = 0; i < q.length; i++) {
+        const res = await post(q[i].b);
+        if (!res) { if ((q[i].n || 0) < 6) keep.push({ b: q[i].b, n: (q[i].n || 0) + 1 }); if (!navigator.onLine) { keep.push(...q.slice(i + 1)); break; } }
+      }
+    } finally {
+      const now = storage.read(OUTBOX, []);
+      storage.write(OUTBOX, keep.concat(Array.isArray(now) ? now : []).slice(0, 50));
+      flushing = false;
+    }
   }
   /* ---- bell (top right): list of new thumbs up/down and comments on my reports; a click opens that thread ---- */
   /** Admin notifications: new report threads from other people (watermark + read list, per device). */
