@@ -341,3 +341,10 @@ button.option.selected .letter, button.option.selected .mark { color: var(--acce
   #print-root img { max-width: 100%; max-height: 7cm; break-inside: avoid; }
   @page { margin: 14mm; }
 }
+
+.field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.field select, .field input { max-width: 100%; }
+.prewrap { white-space: pre-wrap; }
+textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; border: 1px solid var(--line, #d0d5dd); border-radius: 8px; }
+.q-reports { margin: .6rem 0; } .q-reports > summary { cursor: pointer; font-weight: 600; } .rq-item { margin: .5rem 0; }
+@media (max-width: 520px) { .tab { padding: 10px 6px; font-size: .85rem; } }

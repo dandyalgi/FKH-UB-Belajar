@@ -11,6 +11,9 @@
   const REGISTRY_URL = String((window.QUIZ_CONFIG && window.QUIZ_CONFIG.registryUrl) || '');
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
+    { date: '2026-11-25', items: [
+      'New "Reports & Discussion" tab (top bar, next to Fokus UKMPPDH): see all question reports sent by everyone in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, and compare the reported version with the current answer key. You can give a thumbs up or down and comment on any report (comments show your name). You get a 🔔 badge on the tab when others vote or comment on your own reports. Reports for a question also appear under its explanation in the review after a test and in Browse ("Reports & discussion").',
+    ] },
     { date: '2026-11-22', items: [
       'Starting a test: questions are now chosen by the six tinjauan (each in its own block, with counts), instead of the old category list. Sources are in a separate block and there is a "Reset all filters" button.',
     ] },
@@ -65,6 +68,7 @@
     session: 'quiz.session.v1',   // { ids: string[], index: number, answers: { [id]: number } }
     key: 'quiz.key.v1',           // derived decryption key (base64); kept for this tab only (sessionStorage)
     custom: 'quiz.custom.v1',     // questions imported in this browser
+    repseen: 'quiz.repseen.v1',   // { [reportId]: { up, down, c } } activity on my reports already seen
     user: 'quiz.user.v1',         // { id, name } of the participant on this browser
     edits: 'quiz.edits.v1',       // answer-key edits made in this browser
     history: 'quiz.history.v1',   // [{ t, ids, a, tab }] completed exams, newest last
@@ -183,7 +187,7 @@
     const m = r.re.exec(String(source));
     return Boolean(m) && (r.min === null || Number(m[1]) >= r.min);
   });
-  const TABS = Object.freeze([['all', 'All questions'], ['focus', 'Fokus UKMPPDH']]);
+  const TABS = Object.freeze([['all', 'All questions'], ['focus', 'Fokus UKMPPDH'], ['reports', 'Reports & Discussion']]);
 
   /** An image source is either an embedded data URI or a plain relative file path (no scheme, no "..", no leading slash). */
   const SAFE_IMG = /^(?:data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+|(?!.*\.\.)[A-Za-z0-9_][A-Za-z0-9_\-./]*\.(?:png|jpe?g|webp|gif|svg))$/i;
@@ -391,12 +395,13 @@
 
   /** The questions of the current tab. Progress and history are per question, so the tabs simply look at different subsets. */
   const scopeQs = () => (state.tab === 'focus' ? state.questions.filter((q) => isFocusSource(q.source)) : state.questions);
-  const tabHistory = () => state.history.map((e, i) => ({ e, i })).filter(({ e }) => state.tab === 'all' || e.tab === 'focus');
+  const tabHistory = () => state.history.map((e, i) => ({ e, i })).filter(({ e }) => state.tab !== 'focus' || e.tab === 'focus');
 
   function setTab(tab) {
     if (tab === state.tab) return;
     state.tab = tab;
-    storage.write(KEYS.tab, tab);
+    freshShown = {};
+    if (tab !== 'reports') storage.write(KEYS.tab, tab);
     state.scope = { cats: null, srcs: null, tj: noTj() };
     state.ui = freshUi();
     render();
@@ -446,12 +451,12 @@
     return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
   }
   const registry = {
-    async call(init) {
+    async call(init, query) {
       if (!REGISTRY_URL) return null;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 8000);
       try {
-        const res = await fetch(REGISTRY_URL, { ...init, signal: ctrl.signal, redirect: 'follow' });
+        const res = await fetch(query ? `${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}${query}` : REGISTRY_URL, { ...init, signal: ctrl.signal, redirect: 'follow' });
         const data = await res.json();
         return data && data.ok ? data : null;
       } catch (_) { return null; } finally { clearTimeout(timer); }
@@ -461,6 +466,10 @@
       if (!state.user) return;
       const data = await this.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ id: state.user.id, name: state.user.name, university: state.user.university || '' }) });
       if (data && Number.isInteger(data.count)) setParticipants(data.count);
+    },
+    async reports() {
+      const data = await this.call({ method: 'GET' }, `action=reports&device=${encodeURIComponent(state.user ? state.user.id : '')}`);
+      return data && Array.isArray(data.reports) ? data.reports : null;
     },
     async count() {
       const data = await this.call({ method: 'GET' });
@@ -594,6 +603,7 @@
       state.progress = loadProgress();
       state.session = loadSession();
       registry.sync();
+      setTimeout(() => prefetchReports(), 1500);
       state.history = loadHistory();
       state.tab = storage.read(KEYS.tab, 'all') === 'focus' ? 'focus' : 'all';
       state.ui = freshUi();
@@ -809,7 +819,7 @@
       body: JSON.stringify({
         action: 'report', reporter, code: q.id, types: [...types], category: q.category,
         question: q.question, choices: q.options.map((t, i) => `${letter(i)}. ${t}`).join('\n'),
-        answerKey: `${letter(q.correctIndex)}. ${q.options[q.correctIndex]}`, explanation: q.explanation || '', comment: comment.trim().slice(0, 1000),
+        device: state.user ? state.user.id : '', answerKey: `${letter(q.correctIndex)}. ${q.options[q.correctIndex]}`, explanation: q.explanation || '', comment: comment.trim().slice(0, 1000),
       }),
     });
   }
@@ -1363,7 +1373,7 @@
   function tabBar() {
     return h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([id, label]) => h('button', {
       class: `tab${state.tab === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`,
-      'aria-selected': String(state.tab === id), text: label, on: { click: () => setTab(id) },
+      'aria-selected': String(state.tab === id), text: id === 'reports' && state.tab !== 'reports' && freshCount() ? `${label} 🔔${freshCount()}` : label, on: { click: () => setTab(id) },
     })));
   }
 
@@ -1379,6 +1389,7 @@
   }
 
   function viewSetup() {
+    if (state.tab === 'reports') return [tabBar(), ...viewReports()];
     const inner = viewSetupInner();
     const body = state.tab === 'focus' && !scopeQs().length && state.ui.panel !== 'manage' && state.ui.panel !== 'history'
       ? [focusEmpty()] : inner;
@@ -1610,7 +1621,8 @@
         stemNodes(q),
         staticOptions(q, undefined, f.reveal),
         f.reveal && aiNote(q),
-        f.reveal && explanationNode(q)
+        f.reveal && explanationNode(q),
+        f.reveal && questionReports(q)
       );
       if (editingId === q.id) li.append(editorNode(q));
       else {
@@ -1700,6 +1712,203 @@
     const imgs = [...root.querySelectorAll('img')];
     imgs.forEach((im) => { im.loading = 'eager'; });
     Promise.all(imgs.map((im) => (im.decode ? im.decode().catch(() => null) : null))).then(() => setTimeout(() => window.print(), 50));
+  }
+
+  const post = (body) => registry.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+  function voteRow(r, paint, st, pre = 'rp') {
+    const cast = async (v) => {
+      if (!state.user || r.busy) return;
+      const prev = r.mine || 0; const next = prev === v ? 0 : v;
+      r.busy = true;
+      const res = await post({ action: 'rvote', id: r.id, device: state.user.id, vote: next });
+      r.busy = false;
+      if (!res) { st.msg = 'Could not save your vote. Try again.'; paint(); return; }
+      if (prev > 0) r.up = Math.max(0, (r.up || 0) - 1); if (prev < 0) r.down = Math.max(0, (r.down || 0) - 1);
+      if (next > 0) r.up = (r.up || 0) + 1; if (next < 0) r.down = (r.down || 0) + 1;
+      r.mine = next; st.msg = ''; paint();
+    };
+    const btn = (v, label, n, id) => h('button', { class: `btn${(r.mine || 0) === v ? ' primary' : ''}`, type: 'button', id, 'aria-pressed': String((r.mine || 0) === v), text: `${label} ${n || 0}`, on: { click: () => cast(v) } });
+    return h('div', { class: 'row' }, btn(1, '👍', r.up, `${pre}-up`), btn(-1, '👎', r.down, `${pre}-down`));
+  }
+  function commentBox(r, st, paint, pre = 'rp') {
+    const ta = h('textarea', { id: `${pre}-ctext`, rows: '3', maxlength: '1000', placeholder: 'Write a comment…',
+      on: { input: (ev) => { st.draft = ev.target.value; } } });
+    ta.value = st.draft || '';
+    const send = async () => {
+      const text = (st.draft || '').trim();
+      if (text.length < 2 || !state.user || st.sending) return;
+      st.sending = true;
+      const name = `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}`;
+      const res = await post({ action: 'rcomment', id: r.id, name, text });
+      st.sending = false;
+      if (!res) { st.msg = 'Could not send the comment. Try again.'; paint(); return; }
+      (r.comments || (r.comments = [])).push({ t: Date.now(), name, text });
+      st.draft = ''; st.msg = ''; paint();
+    };
+    return h('div', { id: `${pre}-comments` },
+      h('h3', { text: `Comments (${(r.comments || []).length})` }),
+      h('ul', { class: 'hist-list' }, (r.comments || []).length
+        ? r.comments.map((c) => h('li', { class: 'hist-item' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })), h('p', { class: 'prewrap', text: c.text })))
+        : [h('li', { class: 'muted', text: 'No comments yet.' })]),
+      st.msg && h('p', { class: 'notice err', role: 'alert', text: st.msg }),
+      ta, h('div', { class: 'form-actions' }, h('button', { class: 'btn primary', type: 'button', id: `${pre}-csend`, text: 'Send comment', on: { click: send } })));
+  }
+  let reportsCache = null; // { list } | { error } | { loading }
+
+  /* ---- notifications for my own reports: other people's thumbs up/down and comments since I last opened the Reports tab ---- */
+  const myLabel = () => (state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : '');
+  /** Mine = the report's device ID matches this device; reports without a stored device ID fall back to name + university. */
+  const isMine = (r, me) => (r.dev ? r.own : r.by === me);
+  const seenMap = () => { const m = storage.read(KEYS.repseen, {}); return m && typeof m === 'object' ? m : {}; };
+  const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)),
+    c: (r.comments || []).filter((c) => c.name !== myLabel()).length });
+  /** New activity on each of my reports: { [id]: { up, down, c } } with only positive differences. */
+  function freshActivity() {
+    const out = {};
+    if (!reportsCache || !reportsCache.list || !state.user) return out;
+    const seen = seenMap(); const me = myLabel();
+    for (const r of reportsCache.list) {
+      if (!isMine(r, me)) continue;
+      const o = othersOf(r); const s = seen[r.id] || { up: 0, down: 0, c: 0 };
+      const d = { up: Math.max(0, o.up - s.up), down: Math.max(0, o.down - s.down), c: Math.max(0, o.c - s.c) };
+      if (d.up || d.down || d.c) out[r.id] = d;
+    }
+    return out;
+  }
+  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c, 0);
+  function markSeen() {
+    if (!reportsCache || !reportsCache.list) return;
+    const seen = seenMap(); const me = myLabel();
+    for (const r of reportsCache.list) if (isMine(r, me)) seen[r.id] = othersOf(r);
+    storage.write(KEYS.repseen, seen);
+  }
+  let freshShown = {}; // activity highlighted during this visit to the Reports tab
+  let prefetched = false;
+  async function prefetchReports() {
+    if (prefetched || !REGISTRY_URL || !state.user) return;
+    prefetched = true;
+    if (!reportsCache) { const list = await registry.reports(); reportsCache = list ? { list } : null; }
+    if (freshCount() && state.machine === 'SETUP' && state.tab !== 'reports') render();
+  }
+
+  /** "Reports & discussion" for one question, shown under the explanation: everyone's reports with votes and comments. Loaded on first open. */
+  function questionReports(q) {
+    const sts = new Map();
+    const det = h('details', { class: 'q-reports' });
+    const sum = h('summary', { text: 'Reports & discussion' });
+    const body = h('div');
+    det.append(sum, body);
+    const paint = () => {
+      if (!REGISTRY_URL) { body.replaceChildren(h('p', { class: 'muted', text: 'This site is not connected to the report sheet.' })); return; }
+      if (!reportsCache || reportsCache.loading) { body.replaceChildren(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' })); return; }
+      if (reportsCache.error) { body.replaceChildren(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports.' }), h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { reportsCache = null; load(); } } })); return; }
+      const mine = reportsCache.list.filter((r) => r.code === q.id);
+      sum.textContent = `Reports & discussion (${mine.length})`;
+      body.replaceChildren(...(mine.length ? mine.map((r) => {
+        const st = sts.get(r.id) || (sts.set(r.id, {}), sts.get(r.id));
+        return h('div', { class: 'card rq-item' },
+          h('p', {}, h('strong', { text: `${r.types} · ${(r.status || '').trim() || 'Open'}` }), h('span', { class: 'muted', text: ` · ${r.t ? new Date(r.t).toLocaleDateString() : ''}` })),
+          h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
+          r.comment && h('p', {}, h('strong', { text: 'Comment: ' }), r.comment),
+          r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
+          voteRow(r, paint, st, `rq-${r.id}`), commentBox(r, st, paint, `rq-${r.id}`));
+      }) : [h('p', { class: 'muted', text: 'No reports for this question yet. Use "Report" if something looks wrong.' })]));
+    };
+    const load = async () => {
+      if (!REGISTRY_URL || (reportsCache && !reportsCache.error)) { paint(); return; }
+      reportsCache = { loading: true }; paint();
+      const list = await registry.reports();
+      reportsCache = list ? { list } : { error: true };
+      paint();
+    };
+    det.addEventListener('toggle', () => { if (det.open) load(); });
+    if (reportsCache && reportsCache.list) paint(); else sum.textContent = 'Reports & discussion';
+    return det;
+  }
+  function viewReports() {
+    const st = state.ui.rep || (state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20 });
+    const card = h('section', { class: 'card', id: 'reports' });
+    let marked = false;
+    const stOf = (r) => (r.status || '').trim() || 'Open';
+    const typesOf = (r) => r.types.split(',').map((s) => s.trim()).filter(Boolean);
+    const SORTS = [['new', 'Newest'], ['old', 'Oldest'], ['up', 'Most 👍'], ['down', 'Most 👎'], ['net', 'Best score (👍 − 👎)'], ['talk', 'Most comments']];
+    const cmp = {
+      new: (x, y) => y.t - x.t, old: (x, y) => x.t - y.t,
+      up: (x, y) => (y.up || 0) - (x.up || 0) || y.t - x.t, down: (x, y) => (y.down || 0) - (x.down || 0) || y.t - x.t,
+      net: (x, y) => ((y.up || 0) - (y.down || 0)) - ((x.up || 0) - (x.down || 0)) || y.t - x.t,
+      talk: (x, y) => (y.comments || []).length - (x.comments || []).length || y.t - x.t,
+    };
+    /** One report; repaints only itself, so the list keeps its scroll position and open sections. */
+    const reportCard = (r) => {
+      const root = h('article', { class: 'card rq-item', 'data-report-id': r.id });
+      const cs = { draft: '', msg: '', sending: false };
+      let nowOpen = false;
+      const paintOne = () => {
+        const cur = state.byId.get(r.code);
+        const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: 'Question now (full question, key and explanation)' }));
+        if (nowOpen) now.append(cur ? h('div', {}, stemNodes(cur), staticOptions(cur, undefined, true),
+          h('p', {}, h('strong', { text: 'Key now: ' }), `${letter(cur.correctIndex)}. ${cur.options[cur.correctIndex]}`), aiNote(cur), explanationNode(cur, true))
+          : h('p', { class: 'muted', text: 'This question is no longer in the bank.' }));
+        now.addEventListener('toggle', () => { if (now.open && !now.querySelector('div')) paintOne(); });
+        root.replaceChildren(
+          h('p', {}, h('strong', { text: `${r.code} · ${stOf(r)}` }), h('span', { class: 'muted', text: ` · ${r.category}${state.byId.get(r.code) ? ` · Source: ${state.byId.get(r.code).source}` : ''} · ${r.t ? new Date(r.t).toLocaleString() : ''}` })),
+          h('p', { class: 'muted', text: `Type: ${r.types}` }),
+          h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
+          freshShown[r.id] && h('p', { class: 'notice ok', 'data-fresh': r.id, text: `🔔 New on your report: ${[freshShown[r.id].up && `+${freshShown[r.id].up} 👍`, freshShown[r.id].down && `+${freshShown[r.id].down} 👎`, freshShown[r.id].c && `+${freshShown[r.id].c} comment${freshShown[r.id].c === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}` }),
+          r.comment && h('p', { class: 'muted' }, h('strong', { text: 'Comment: ' }), r.comment),
+          r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
+          now,
+          h('details', {}, h('summary', { text: 'Question as reported (snapshot when reported)' }),
+            h('p', { class: 'prewrap', text: r.question }), h('p', { class: 'prewrap', text: r.choices }),
+            h('p', {}, h('strong', { text: 'Key then: ' }), r.key),
+            r.explanation && h('p', { class: 'prewrap' }, h('strong', { text: 'Explanation then: ' }), r.explanation)),
+          voteRow(r, paintOne, cs, `rq-${r.id}`), commentBox(r, cs, paintOne, `rq-${r.id}`));
+      };
+      paintOne();
+      return root;
+    };
+    const paint = () => {
+      const kids = [h('h2', { text: 'Reports & Discussion' }),
+        h('p', { class: 'muted', text: 'Reports sent by everyone. Status is updated by the admin.' })];
+      if (!REGISTRY_URL) kids.push(h('p', { class: 'muted', text: 'This site is not connected to the report sheet.' }));
+      else if (!reportsCache || reportsCache.loading) kids.push(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' }));
+      else if (reportsCache.error) kids.push(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports. Check your connection (the sheet script must be updated and redeployed).' }),
+        h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { reportsCache = null; load(); } } }));
+      else {
+        const all = reportsCache.list;
+        const statuses = sortedUnique(all.map(stOf));
+        const types = sortedUnique(all.flatMap(typesOf));
+        const qq = st.query.trim().toLowerCase();
+        const shown = all.filter((r) => (st.status === 'all' || stOf(r) === st.status) && (st.type === 'all' || typesOf(r).includes(st.type))
+          && (!qq || (r.code + ' ' + r.question + ' ' + r.comment).toLowerCase().includes(qq))).sort(cmp[st.sort] || cmp.new);
+        const sel = (id, label, cur, opts, onc, labels) => h('label', { class: 'field' }, h('span', { text: label }),
+          h('select', { id, on: { change: (ev) => { onc(ev.target.value); st.limit = 20; paint(); } } },
+            opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
+        kids.push(h('div', { class: 'row' },
+          sel('rp-sort', 'Sort by', st.sort, SORTS, (v) => { st.sort = v; }),
+          sel('rp-status', 'Status', st.status, [['all', 'All'], ...statuses.map((x) => [x, x])], (v) => { st.status = v; }),
+          sel('rp-type', 'Type of error', st.type, [['all', 'All'], ...types.map((x) => [x, x])], (v) => { st.type = v; })),
+          h('label', { class: 'field' }, h('span', { text: 'Search code / question / comment' }),
+            h('input', { id: 'rp-query', type: 'text', value: st.query, autocomplete: 'off', on: { change: (ev) => { st.query = ev.target.value; st.limit = 20; paint(); } } })),
+          h('p', { class: 'muted', id: 'rp-count', role: 'status', text: `${shown.length} of ${all.length} reports.` }));
+        if (!marked) { freshShown = freshActivity(); markSeen(); marked = true; }
+        const nf = Object.keys(freshShown).length;
+        if (nf) kids.push(h('p', { class: 'notice ok', id: 'rp-fresh', role: 'status', text: `🔔 New activity on ${nf} of your report${nf === 1 ? '' : 's'}. Marked below.` }));
+        const part = shown.slice(0, st.limit);
+        kids.push(h('div', { id: 'rp-list' }, part.length ? part.map(reportCard) : h('p', { class: 'muted', text: 'No reports match.' })));
+        if (shown.length > part.length) kids.push(h('div', { class: 'form-actions' }, h('button', { class: 'btn', type: 'button', id: 'rp-more', text: `Show more (${shown.length - part.length} left)`, on: { click: () => { st.limit += 20; paint(); } } })));
+      }
+      card.replaceChildren(...kids.filter(Boolean));
+    };
+    const load = async () => {
+      if (!REGISTRY_URL || (reportsCache && !reportsCache.error)) return;
+      reportsCache = { loading: true }; paint();
+      const list = await registry.reports();
+      reportsCache = list ? { list } : { error: true };
+      if (state.machine === 'SETUP' && state.tab === 'reports') paint();
+    };
+    paint(); load();
+    return [card];
   }
 
   function viewPrint() {
@@ -2002,6 +2211,7 @@
           reveal && aiNote(q),
           reveal && wrong && h('p', { class: 'your-answer', text: `Your answer: ${letter(chosen)}. ${q.options[chosen]}` }),
           reveal && explanationNode(q, true),
+          reveal && questionReports(q),
           reportControl(q)
         );
       }) : [h('li', { class: 'muted', text: 'None.' })]));
