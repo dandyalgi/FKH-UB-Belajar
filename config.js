@@ -1,5 +1,5 @@
 // Paste the Web app URL of your Google Apps Script here (see google-sheet-script.gs).
 // Leave it empty to keep names on each device only (no participant count).
 window.QUIZ_CONFIG = {
-  registryUrl: 'https://script.google.com/macros/library/d/10q4yc70n3RX9S9tJTvV21CcJWun5wGEHzx9LmH1LjbyaizBdWJ55ms3x/9',
+  registryUrl: 'https://script.google.com/macros/s/AKfycbwRnc62s3f4m_BDahDjkRC0PtKb3GXt9sNy7gyvu2v8gZU0Dfj3k2rB-H3a-Sw3GoiiLw/exec',
 };
