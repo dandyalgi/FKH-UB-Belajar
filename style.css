@@ -358,3 +358,26 @@ textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; bor
 .mention.me { background: rgba(250, 204, 21, .35); border-radius: 4px; padding: 0 3px; }
 .reply-btn { font-size: .8rem; padding: 2px 8px; margin-top: 2px; }
 .reply-to { margin: 6px 0 2px; }
+
+/* clearer "view the question" buttons inside report threads */
+.rq-item > details > summary, .q-reports > summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; margin: 10px 0; padding: 12px 14px;
+  border: 2px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 12%, var(--card)); color: var(--accent);
+  font-weight: 700; font-size: 1rem;
+}
+.rq-item > details > summary::-webkit-details-marker, .q-reports > summary::-webkit-details-marker { display: none; }
+.rq-item > details > summary::before, .q-reports > summary::before { content: '▶'; font-size: .8em; transition: transform .15s; }
+.rq-item > details[open] > summary::before, .q-reports[open] > summary::before { transform: rotate(90deg); }
+.rq-item > details > summary::after, .q-reports > summary::after { content: 'tap to open'; margin-left: auto; font-weight: 400; font-size: .8rem; opacity: .85; }
+.rq-item > details[open] > summary::after, .q-reports[open] > summary::after { content: 'tap to close'; }
+.rq-item > details > summary:hover, .q-reports > summary:hover { background: color-mix(in srgb, var(--accent) 20%, var(--card)); }
+/* admin */
+.admin-bar { border: 2px dashed var(--accent); border-radius: 10px; padding: 8px 10px; margin: 8px 0; }
+.admin-bar .row { margin: 6px 0; gap: 8px; flex-wrap: wrap; }
+.admin-bar input[type=text] { flex: 1 1 200px; }
+.rq-item.deleted { opacity: .6; }
+.admin-editor { border: 2px solid var(--accent); border-radius: 10px; padding: 10px; margin: 8px 0; }
+.admin-editor textarea, .admin-editor input[type=text], .admin-editor select { width: 100%; box-sizing: border-box; }
+details.edit-history { margin: 6px 0; font-size: .92rem; } details.edit-history > summary { cursor: pointer; font-weight: 600; }
+code { word-break: break-all; }
+.hist-item.cm { display: block; }

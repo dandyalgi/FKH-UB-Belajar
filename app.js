@@ -12,6 +12,8 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-25', items: [
+      'Admins (set by the owner) can close, reopen and delete report threads, hide comments, and edit a question (text, options, answer key, explanation) straight from a thread or from Browse. Edits are saved for everyone, marked “Edited by admin” with a visible history, and your progress is re-graded if the key changed. Admins can add other admins in the new Admin tab. Your device ID is shown on the main screen.',
+      'The “View the question now / as reported” buttons in report threads are now much easier to see.',
       'Reply to a comment: tap “↩ Reply” under any comment. The person you reply to is tagged and gets a notification in the 🔔 list.',
       'Fixed: the 🔔 button now shows right after you sign in, without opening Reports & Discussion first.',
       'Added 475 questions from TO NAS November 2026: FIKKIA (73), UNUD (95), USK (93) and UB (214). They also show up in Fokus UKMPPDH.',
@@ -388,8 +390,9 @@
     for (const q of [...state.bank, ...state.custom]) {
       if (!seen.has(q.id)) { seen.add(q.id); base.push(q); }
     }
-    state.baseById = new Map(base.map((q) => [q.id, q]));
-    state.questions = base.map(applyEdit);
+    const baseR = base.map(remoteOf);
+    state.baseById = new Map(baseR.map((q) => [q.id, q]));
+    state.questions = baseR.map(applyEdit);
     state.byId = new Map(state.questions.map((q) => [q.id, q]));
     // The bank changed (load or import): any category/source it adds must be selectable, so go back to "all".
     state.scope = { cats: null, srcs: null, tj: noTj() };
@@ -404,7 +407,7 @@
     if (tab === state.tab) return;
     state.tab = tab;
     freshShown = {}; pinnedFresh = {};
-    if (tab !== 'reports') storage.write(KEYS.tab, tab);
+    if (tab !== 'reports' && tab !== 'admin') storage.write(KEYS.tab, tab);
     state.scope = { cats: null, srcs: null, tj: noTj() };
     state.ui = freshUi();
     render();
@@ -461,6 +464,7 @@
       try {
         const res = await fetch(query ? `${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}${query}` : REGISTRY_URL, { ...init, signal: ctrl.signal, redirect: 'follow' });
         const data = await res.json();
+        if (data && data.conflict) return { ok: false, conflict: true };
         return data && data.ok ? data : null;
       } catch (_) { return null; } finally { clearTimeout(timer); }
     },
@@ -486,6 +490,157 @@
     if (el) el.textContent = participantsText();
   }
   const participantsText = () => (state.participants === null ? '' : `${state.participants} participant${state.participants === 1 ? ' has' : 's have'} used Quiz Time.`);
+
+
+  /* ---- shared admin edits (stored ENCRYPTED in the sheet), admin flag and edit history ---- */
+  const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '' };
+  let adminFlag = false;
+  let editingOpen = false;
+  const isAdmin = () => adminFlag;
+  const RKEYS = 'quiz.rkeys.v1';
+  async function sealJson(obj) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, state.key, enc.encode(JSON.stringify(obj)));
+    return `e1:${b64e(iv)}.${b64e(new Uint8Array(ct))}`;
+  }
+  async function openJson(p) {
+    try {
+      const [iv, ct] = String(p).slice(3).split('.');
+      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, state.key, b64d(ct));
+      return JSON.parse(new TextDecoder().decode(pt));
+    } catch (_) { return null; }
+  }
+  /** The question with the admin edit applied (ignored if it does not fit the question). */
+  function remoteOf(q) {
+    const e = remote.cur.get(q.id);
+    if (!e || typeof e.question !== 'string' || !e.question.trim() || !Array.isArray(e.options) || e.options.length !== q.options.length
+      || !e.options.every((o) => typeof o === 'string' && o.trim()) || !Number.isInteger(e.correctIndex) || e.correctIndex < 0 || e.correctIndex >= q.options.length) return q;
+    return Object.freeze({ ...q, question: e.question, options: e.options.slice(), correctIndex: e.correctIndex,
+      explanation: typeof e.explanation === 'string' ? e.explanation : q.explanation, aiGenerated: e.aiGenerated === true, remoteEdit: { rev: e.rev, by: e.by, t: e.t } });
+  }
+  /** One call: am I an admin, and every edit so far. `quiet`: the caller applies the result itself (start-up). */
+  async function loadRemote(force, quiet) {
+    if (!REGISTRY_URL || !state.user || !state.key) return false;
+    const data = await registry.call({ method: 'GET' }, `action=boot&device=${encodeURIComponent(state.user.id)}&app=quiz`);
+    if (!data) return false;
+    const rows = (Array.isArray(data.edits) ? data.edits : []).filter((r) => r && typeof r.item === 'string' && Number.isInteger(r.rev) && typeof r.p === 'string')
+      .sort((x, y) => (x.item < y.item ? -1 : x.item > y.item ? 1 : x.rev - y.rev));
+    const sig = `${data.admin ? 1 : 0}:${rows.length}:${rows.reduce((m, r) => Math.max(m, r.t || 0), 0)}`;
+    if (!force && sig === remote.sig) return true;
+    const bodies = await Promise.all(rows.map((r) => openJson(r.p)));
+    const cur = new Map(); const rev = new Map(); const hist = new Map();
+    rows.forEach((r, i) => {
+      const b = bodies[i];
+      rev.set(r.item, Math.max(rev.get(r.item) || 0, r.rev));
+      if (!hist.has(r.item)) hist.set(r.item, []);
+      hist.get(r.item).push({ rev: r.rev, by: r.by, t: r.t, kind: r.kind, note: b && b.note, before: b && b.before, set: b && b.set });
+      if (r.kind === 'revert') cur.delete(r.item);
+      else if (b && b.set) cur.set(r.item, { ...b.set, rev: r.rev, by: r.by, t: r.t });
+    });
+    const wasAdmin = adminFlag;
+    adminFlag = data.admin === true;
+    Object.assign(remote, { cur, rev, hist, sig });
+    if (!quiet) {
+      applyRemoteChange();
+      if (wasAdmin !== adminFlag && state.machine === 'SETUP' && !editingOpen) render();
+    }
+    return true;
+  }
+  function applyRemoteChange() {
+    if (!state.baseById) return;
+    const scope = state.scope; const f = state.ui && state.ui.filter;
+    const keep = f ? { cats: f.cats, srcs: f.srcs, tj: f.tj } : null;
+    rebuildQuestions();
+    if (scope) state.scope = scope;
+    if (keep) Object.assign(state.ui.filter, keep);
+    recomputeProgress();
+    pruneEdits();
+  }
+  /** A changed answer key changes what counts as correct: re-grade my last answer to each admin-edited question. */
+  function recomputeProgress() {
+    const prev = storage.read(RKEYS, []);
+    const ids = new Set([...(Array.isArray(prev) ? prev : []), ...remote.cur.keys()]);
+    if (!ids.size || !state.history) return;
+    const last = new Map();
+    for (const e of state.history) e.ids.forEach((id, i) => { if (ids.has(id)) last.set(id, e.a[i]); });
+    let changed = false;
+    for (const id of ids) {
+      const q = state.byId.get(id);
+      if (!q || !last.has(id)) continue;
+      const st = last.get(id) === q.correctIndex ? 'correct' : 'incorrect';
+      if (state.progress[id] !== st) { state.progress[id] = st; changed = true; }
+    }
+    if (changed) saveProgress();
+    storage.write(RKEYS, [...remote.cur.keys()]);
+  }
+  const adminPost = (body) => registry.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, device: state.user.id, editor: myLabel() }) });
+
+  /** Edit history of one question (visible to everyone). */
+  function editInfo(q) {
+    const hs = remote.hist.get(q.id);
+    if (!hs || !hs.length) return null;
+    const clip = (t) => { t = String(t == null ? '' : t); return t.length > 300 ? `${t.slice(0, 300)}…` : t; };
+    const change = (label, a, b) => h('p', { class: 'prewrap' }, h('strong', { text: `${label}: ` }), h('s', { class: 'muted', text: clip(a) }), ' → ', clip(b));
+    const lines = (e) => {
+      const b = e.before; const n = e.set; if (!b || !n) return [];
+      const out = [];
+      if (b.question !== n.question) out.push(change('Question', b.question, n.question));
+      (n.options || []).forEach((o, i) => { if (b.options && b.options[i] !== o) out.push(change(`Option ${letter(i)}`, b.options[i], o)); });
+      if (b.correctIndex !== n.correctIndex) out.push(change('Answer key', letter(b.correctIndex), letter(n.correctIndex)));
+      if ((b.explanation || '') !== (n.explanation || '')) out.push(change('Explanation', b.explanation, n.explanation));
+      return out;
+    };
+    return h('details', { class: 'edit-history' }, h('summary', { text: `✎ Edited by admin · history (${hs.length})` }),
+      h('ul', { class: 'hist-list' }, hs.slice().sort((x, y) => y.rev - x.rev).map((e) => h('li', { class: 'hist-item cm' },
+        h('div', {}, h('strong', { text: e.kind === 'revert' ? 'Reverted to the original version' : `Edit #${e.rev}` }), h('span', { class: 'muted', text: ` · ${e.by} · ${e.t ? new Date(e.t).toLocaleString() : ''}` })),
+        e.note && h('p', { class: 'muted', text: `Reason: ${e.note}` }), lines(e)))));
+  }
+
+  /** Admin editor for one question: question, options, key, explanation. Saved for everyone. */
+  function adminEditor(q, done) {
+    editingOpen = true;
+    const close = (changed) => { editingOpen = false; done(changed); };
+    const area = (id, v, rows) => { const t = h('textarea', { id, rows: String(rows), maxlength: '4000' }); t.value = v; return t; };
+    const qEl = area('ae-q', q.question, 5);
+    const opts = q.options.map((t, i) => { const el = h('input', { type: 'text', id: `ae-o${i}`, maxlength: '600' }); el.value = t; return el; });
+    const sel = h('select', { id: 'ae-correct' }, q.options.map((_, i) => h('option', { value: String(i), text: letter(i) })));
+    sel.value = String(q.correctIndex);
+    const ex = area('ae-expl', q.explanation || '', 5);
+    const ai = h('input', { id: 'ae-ai', type: 'checkbox', checked: q.aiGenerated });
+    const note = h('input', { type: 'text', id: 'ae-note', maxlength: '200', placeholder: 'Reason (optional, shown in the edit history)' });
+    const msg = h('p', { class: 'notice', role: 'alert', hidden: true });
+    const show = (t, cls = 'err') => { msg.hidden = false; msg.className = `notice ${cls}`; msg.textContent = t; };
+    const mk = (id, text, cls, fn) => h('button', { class: `btn ${cls}`, type: 'button', id, text, on: { click: fn } });
+    const send = async (kind) => {
+      const before = { question: q.question, options: q.options.slice(), correctIndex: q.correctIndex, explanation: q.explanation || '', aiGenerated: q.aiGenerated === true };
+      let set = null;
+      if (kind === 'edit') {
+        set = { question: qEl.value.trim(), options: opts.map((o) => o.value.trim()), correctIndex: Number(sel.value), explanation: ex.value.trim(), aiGenerated: ai.checked };
+        if (!set.question || set.options.some((o) => !o)) { show('The question and every option need text.'); return; }
+        if (JSON.stringify(set) === JSON.stringify(before)) { show('Nothing changed.'); return; }
+      }
+      saveBtn.disabled = true; if (revBtn) revBtn.disabled = true;
+      const p = await sealJson({ kind, set, before, note: note.value.trim() });
+      const res = await adminPost({ action: 'aedit', app: 'quiz', item: q.id, kind, rev: remote.rev.get(q.id) || 0, p });
+      saveBtn.disabled = false; if (revBtn) revBtn.disabled = false;
+      if (!res) { show('Could not save. Check your connection and that the sheet script is updated and redeployed.'); return; }
+      if (res.conflict) { await loadRemote(true); show('Another admin edited this question in the meantime. The latest version is loaded: close and open the editor again.'); return; }
+      await loadRemote(true);
+      close(true);
+    };
+    const saveBtn = mk('ae-save', 'Save for everyone', 'primary', () => send('edit'));
+    const revBtn = remote.cur.has(q.id) ? mk('ae-revert', 'Revert to original', 'danger', () => { if (window.confirm('Revert this question to the original version for everyone?')) send('revert'); }) : null;
+    return h('div', { class: 'editor admin-editor', id: 'admin-editor' },
+      h('h3', { text: `Edit ${q.id} (saved for everyone)` }),
+      h('label', { for: 'ae-q', text: 'Question' }), qEl,
+      opts.map((el, i) => h('div', {}, h('label', { for: `ae-o${i}`, text: `Option ${letter(i)}` }), el)),
+      h('label', { for: 'ae-correct', text: 'Correct answer' }), sel,
+      h('label', { for: 'ae-expl', text: 'Explanation' }), ex,
+      h('label', { class: 'inline-check' }, ai, 'Still AI-generated (untick once verified)'),
+      h('label', { for: 'ae-note', text: 'Reason' }), note,
+      msg,
+      h('div', { class: 'row form-actions' }, saveBtn, mk('ae-cancel', 'Cancel', '', () => close(false)), revBtn));
+  }
 
   function loadProgress() {
     const raw = storage.read(KEYS.progress, {});
@@ -600,6 +755,11 @@
       state.custom = custom.filter((q) => !bankIds.has(q.id));
       if (state.custom.length !== custom.length) saveCustom();
 
+      if (state.user) {
+        const pr = loadRemote(false, true);
+        const first = await Promise.race([pr, new Promise((res) => setTimeout(() => res(null), 3500))]);
+        if (first === null) pr.then(() => { applyRemoteChange(); if (state.machine === 'SETUP' && !editingOpen) render(); }).catch(() => {});
+      }
       state.edits = loadEdits();
       rebuildQuestions();
       pruneEdits();
@@ -608,6 +768,7 @@
       registry.sync();
       setTimeout(() => prefetchReports(), 1500);
       state.history = loadHistory();
+      recomputeProgress();
       state.tab = storage.read(KEYS.tab, 'all') === 'focus' ? 'focus' : 'all';
       state.ui = freshUi();
 
@@ -1047,6 +1208,9 @@
   const optionImage = (q, i) => (q.optionImages && q.optionImages[i] ? imageNodes([q.optionImages[i]], `Option ${letter(i)} image`, 'opt-images') : null);
 
   function explanationNode(q, open = false) {
+    return h('div', { class: 'expl-wrap' }, explanationDetails(q, open), editInfo(q));
+  }
+  function explanationDetails(q, open) {
     return h('details', { class: 'explanation', open: open && Boolean(q.explanation || (q.explanationImages && q.explanationImages.length)) },
       h('summary', { text: 'Show explanation' }),
       q.explanation
@@ -1374,7 +1538,7 @@
   const bpupkhShell = (nodes, left, right) => h('div', { class: 'shell' }, h('aside', { class: 'left' }, left), h('div', { class: 'mainCol' }, nodes), h('aside', { class: 'right' }, right));
 
   function tabBar() {
-    return h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([id, label]) => h('button', {
+    return h('div', { class: 'tabs', role: 'tablist' }, (isAdmin() ? [...TABS, ['admin', 'Admin']] : TABS).map(([id, label]) => h('button', {
       class: `tab${state.tab === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`,
       'aria-selected': String(state.tab === id), text: label, on: { click: () => setTab(id) },
     })));
@@ -1393,6 +1557,7 @@
 
   function viewSetup() {
     if (state.tab === 'reports') return [tabBar(), ...viewReports()];
+    if (state.tab === 'admin' && isAdmin()) return [tabBar(), ...viewAdmin()];
     const inner = viewSetupInner();
     const body = state.tab === 'focus' && !scopeQs().length && state.ui.panel !== 'manage' && state.ui.panel !== 'history'
       ? [focusEmpty()] : inner;
@@ -1427,6 +1592,8 @@
       legend(t),
       h('p', { class: 'muted', id: 'user-line' }, state.user ? `Signed in as ${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}. ` : '',
         h('button', { class: 'linkbtn', type: 'button', id: 'change-name', text: 'Change name / university', on: { click: () => showNamePage(() => { render(); }) } })),
+      state.user && h('p', { class: 'muted', id: 'device-line' }, `Device ID: `, h('code', { text: state.user.id }), ' ',
+        h('button', { class: 'linkbtn', type: 'button', id: 'copy-device', text: 'Copy', on: { click: () => { try { navigator.clipboard.writeText(state.user.id); } catch (_) { /* ignore */ } } } }), isAdmin() && ' · Admin'),
       h('p', { class: 'muted', id: 'participants', text: participantsText() })
     ));
     nodes.push(categoryTable(stats.categories));
@@ -1618,6 +1785,7 @@
         h('div', { class: 'q-head' },
           h('span', { text: labelOf(q) }),
           h('span', { class: 'badges' },
+            q.remoteEdit && h('span', { class: 'badge edited', text: 'Edited by admin' }),
             state.edits[q.id] && h('span', { class: 'badge edited', text: 'Edited' }),
             statusBadge(s))
         ),
@@ -1627,10 +1795,10 @@
         f.reveal && explanationNode(q),
         f.reveal && questionReports(q)
       );
-      if (editingId === q.id) li.append(editorNode(q));
+      if (editingId === q.id) li.append(isAdmin() ? adminEditor(q, () => { editingId = null; paint(); }) : editorNode(q));
       else {
         li.append(h('div', { class: 'row item-actions' }, h('button', {
-          class: 'btn', type: 'button', 'data-edit': q.id, text: 'Edit answer key',
+          class: 'btn', type: 'button', 'data-edit': q.id, text: isAdmin() ? '✎ Edit question (admin)' : 'Edit answer key',
           on: { click: () => { editingId = q.id; note.textContent = ''; paint(); } },
         })));
       }
@@ -1758,8 +1926,10 @@
     return h('div', { id: `${pre}-comments` },
       h('h3', { text: `Comments (${(r.comments || []).length})` }),
       h('ul', { class: 'hist-list' }, (r.comments || []).length
-        ? r.comments.map((c) => { const rp = replyOf(c.text); return h('li', { class: 'hist-item' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
+        ? r.comments.map((c) => { const rp = replyOf(c.text); return h('li', { class: 'hist-item cm' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
           h('p', { class: 'prewrap' }, rp.to && h('span', { class: `mention${rp.to === me ? ' me' : ''}`, text: `@${rp.to}` }), rp.to && ' ', rp.text),
+          c.hidden && h('p', { class: 'muted', text: '(hidden from users)' }),
+          isAdmin() && c.cid && h('button', { class: 'btn reply-btn', type: 'button', text: c.hidden ? 'Unhide' : 'Hide', on: { click: async () => { const res = await adminPost({ action: 'ahide', app: 'quiz', id: r.id, cid: c.cid, hide: !c.hidden }); if (res) { c.hidden = !c.hidden; paint(); } } } }),
           c.name !== me && h('button', { class: 'btn reply-btn', type: 'button', text: '↩ Reply', on: { click: () => { st.replyTo = c.name; paint(); const t = document.getElementById(`${pre}-ctext`); if (t) t.focus(); } } })); })
         : [h('li', { class: 'muted', text: 'No comments yet.' })]),
       st.msg && h('p', { class: 'notice err', role: 'alert', text: st.msg }),
@@ -1818,6 +1988,7 @@
       const list = await registry.reports();
       if (list && state.tab !== 'reports') { reportsCache = { list }; renderBell(); }
       else if (!list) renderBell();
+      if (state.machine === 'SETUP' && !editingOpen) loadRemote(false).catch(() => {});
     }, 90000);
   }
   /* ---- bell (top right): list of new thumbs up/down and comments on my reports; a click opens that thread ---- */
@@ -1867,7 +2038,7 @@
       if (!REGISTRY_URL) { body.replaceChildren(h('p', { class: 'muted', text: 'This site is not connected to the report sheet.' })); return; }
       if (!reportsCache || reportsCache.loading) { body.replaceChildren(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' })); return; }
       if (reportsCache.error) { body.replaceChildren(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports.' }), h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { reportsCache = null; load(); } } })); return; }
-      const mine = reportsCache.list.filter((r) => r.code === q.id);
+      const mine = reportsCache.list.filter((r) => r.code === q.id && !r.deleted);
       sum.textContent = `Reports & discussion (${mine.length})`;
       body.replaceChildren(...(mine.length ? mine.map((r) => {
         const st = sts.get(r.id) || (sts.set(r.id, {}), sts.get(r.id));
@@ -1908,15 +2079,39 @@
       const root = h('article', { class: 'card rq-item', 'data-report-id': r.id });
       const cs = { draft: '', msg: '', sending: false };
       let nowOpen = false; let rendered = false;
+      const adminBar = () => {
+        if (!isAdmin()) return null;
+        const closed = stOf(r) !== 'Open';
+        const noteIn = h('input', { type: 'text', maxlength: '300', id: `rq-${r.id}-note`, placeholder: 'Admin note (shown to everyone)' });
+        noteIn.value = r.note || '';
+        const act = async (body, apply) => {
+          cs.admMsg = '';
+          const res = await adminPost({ app: 'quiz', id: r.id, ...body });
+          if (res) apply(); else cs.admMsg = 'Could not save. Is the sheet script updated and redeployed?';
+          paintOne();
+        };
+        const btn = (id, text, cls, fn) => h('button', { class: `btn ${cls || ''}`, type: 'button', id: `rq-${r.id}-${id}`, text, on: { click: fn } });
+        return h('div', { class: 'admin-bar' }, h('strong', { text: 'Admin' }),
+          h('div', { class: 'row' },
+            btn('status', closed ? 'Reopen thread' : 'Close thread', '', () => act({ action: 'astatus', status: closed ? '' : 'Closed', note: noteIn.value }, () => { r.status = closed ? '' : 'Closed'; r.note = noteIn.value.trim(); })),
+            btn('del', r.deleted ? 'Restore thread' : 'Delete thread', r.deleted ? '' : 'danger', () => { if (r.deleted || window.confirm('Delete this thread? Only admins will still see it (you can restore it).')) act({ action: 'adel', del: !r.deleted }, () => { r.deleted = !r.deleted; }); }),
+            state.byId.get(r.code) && btn('edit', '✎ Edit question', 'primary', () => { cs.edit = true; nowOpen = true; paintOne(); })),
+          h('div', { class: 'row' }, noteIn, btn('note', 'Save note', '', () => act({ action: 'astatus', note: noteIn.value }, () => { r.note = noteIn.value.trim(); }))),
+          cs.admMsg && h('p', { class: 'notice err', role: 'alert', text: cs.admMsg }));
+      };
       const paintOne = () => {
         const cur = state.byId.get(r.code);
-        const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: 'Question now (full question, key and explanation)' }));
+        const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: '👁 View the question now (full question, key and explanation)' }));
         if (nowOpen) now.append(cur ? h('div', {}, stemNodes(cur), staticOptions(cur, undefined, true),
           h('p', {}, h('strong', { text: 'Key now: ' }), `${letter(cur.correctIndex)}. ${cur.options[cur.correctIndex]}`), aiNote(cur), explanationNode(cur, true))
           : h('p', { class: 'muted', text: 'This question is no longer in the bank.' }));
         rendered = nowOpen;
         now.addEventListener('toggle', () => { if (now.open && !rendered) paintOne(); });
+        root.className = `card rq-item${r.deleted ? ' deleted' : ''}`;
         root.replaceChildren(...[
+          r.deleted && h('p', { class: 'notice err', text: '🗑 Deleted: only admins can see this thread.' }),
+          adminBar(),
+          cs.edit && state.byId.get(r.code) && (cs.ed || (cs.ed = adminEditor(state.byId.get(r.code), () => { cs.edit = false; cs.ed = null; paintOne(); }))),
           h('p', {}, h('strong', { text: `${r.code} · ${stOf(r)}` }), h('span', { class: 'muted', text: ` · ${r.category}${state.byId.get(r.code) ? ` · Source: ${state.byId.get(r.code).source}` : ''} · ${r.t ? new Date(r.t).toLocaleString() : ''}` })),
           h('p', { class: 'muted', text: `Type: ${r.types}` }),
           h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
@@ -1924,7 +2119,7 @@
           r.comment && h('p', { class: 'muted' }, h('strong', { text: 'Comment: ' }), r.comment),
           r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
           now,
-          h('details', {}, h('summary', { text: 'Question as reported (snapshot when reported)' }),
+          h('details', {}, h('summary', { text: '🕘 View the question as it was when reported' }),
             h('p', { class: 'prewrap', text: r.question }), h('p', { class: 'prewrap', text: r.choices }),
             h('p', {}, h('strong', { text: 'Key then: ' }), r.key),
             r.explanation && h('p', { class: 'prewrap' }, h('strong', { text: 'Explanation then: ' }), r.explanation)),
@@ -1978,6 +2173,53 @@
       renderBell();
       if (state.machine === 'SETUP' && state.tab === 'reports') paint();
     };
+    paint(); load();
+    return [card];
+  }
+
+
+  /** Admin tab: device ID, list of admins (add / remove) and the edit log. */
+  function viewAdmin() {
+    const card = h('section', { class: 'card', id: 'admin-panel' });
+    let admins = null; let msg = '';
+    const load = async () => {
+      const d = await registry.call({ method: 'GET' }, `action=admins&device=${encodeURIComponent(state.user.id)}`);
+      admins = d && Array.isArray(d.admins) ? d.admins : false; paint();
+    };
+    const idIn = h('input', { id: 'ad-id', type: 'text', placeholder: 'Device ID, e.g. 21faf0a4-0960-…', autocomplete: 'off', maxlength: '64' });
+    const lbIn = h('input', { id: 'ad-label', type: 'text', placeholder: 'Name (optional)', maxlength: '60', autocomplete: 'off' });
+    const add = async () => {
+      const id = idIn.value.trim();
+      if (!/^[A-Za-z0-9-]{6,64}$/.test(id)) { msg = 'That does not look like a device ID.'; paint(); return; }
+      const res = await adminPost({ action: 'aadmin_add', target: id, label: lbIn.value.trim() });
+      msg = res ? 'Admin added.' : 'Could not add. Is the sheet script updated and redeployed?';
+      if (res) { idIn.value = ''; lbIn.value = ''; await load(); } else paint();
+    };
+    const del = async (id) => {
+      if (!window.confirm('Remove this admin?')) return;
+      const res = await adminPost({ action: 'aadmin_del', target: id });
+      msg = res ? 'Admin removed.' : 'Could not remove.'; await load();
+    };
+    const log = [...remote.hist.entries()].flatMap(([item, hs]) => hs.map((e) => ({ item, ...e }))).sort((x, y) => (y.t || 0) - (x.t || 0)).slice(0, 50);
+    const paint = () => card.replaceChildren(...[
+      h('h2', { text: 'Admin' }),
+      h('p', { class: 'muted' }, 'Your device ID: ', h('code', { text: state.user.id })),
+      h('h3', { text: 'Admins' }),
+      admins === null ? h('p', { class: 'muted', role: 'status', text: 'Loading…' })
+        : admins === false ? h('p', { class: 'notice err', role: 'alert', text: 'Could not load the admin list.' })
+          : h('ul', { class: 'hist-list', id: 'admin-list' }, admins.map((a) => h('li', { class: 'hist-item cm' },
+            h('code', { text: a.id }), ` ${a.label || ''}${a.seed ? ' (owner)' : ''} `,
+            !a.seed && a.id !== state.user.id && h('button', { class: 'btn reply-btn', type: 'button', text: 'Remove', 'data-del': a.id, on: { click: () => del(a.id) } })))),
+      h('h3', { text: 'Add admin' }),
+      h('p', { class: 'muted', text: 'Ask the person to copy their device ID from the main screen ("Device ID") and send it to you.' }),
+      h('label', { for: 'ad-id', text: 'Device ID' }), idIn, h('label', { for: 'ad-label', text: 'Name' }), lbIn,
+      h('div', { class: 'form-actions' }, h('button', { class: 'btn primary', type: 'button', id: 'ad-add', text: 'Add admin', on: { click: add } })),
+      msg && h('p', { class: 'notice', role: 'status', text: msg }),
+      h('h3', { text: 'Edit log (latest 50)' }),
+      log.length ? h('ul', { class: 'hist-list' }, log.map((e) => h('li', { class: 'hist-item' }, h('strong', { text: e.item }),
+        h('span', { class: 'muted', text: ` · ${e.kind === 'revert' ? 'reverted' : `edit #${e.rev}`} · ${e.by} · ${e.t ? new Date(e.t).toLocaleString() : ''}${e.note ? ` · ${e.note}` : ''}` }))))
+        : h('p', { class: 'muted', text: 'No edits yet.' }),
+    ].filter(Boolean));
     paint(); load();
     return [card];
   }
