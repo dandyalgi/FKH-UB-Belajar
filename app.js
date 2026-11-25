@@ -12,7 +12,7 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-25', items: [
-      'New "Reports & Discussion" tab (top bar, next to Fokus UKMPPDH): see all question reports sent by everyone in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, and compare the reported version with the current answer key. You can give a thumbs up or down and comment on any report (comments show your name). You get a 🔔 badge on the tab when others vote or comment on your own reports. Reports for a question also appear under its explanation in the review after a test and in Browse ("Reports & discussion").',
+      'New "Reports & Discussion" tab (top bar, next to Fokus UKMPPDH): see all question reports sent by everyone in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, and compare the reported version with the current answer key. You can give a thumbs up or down and comment on any report (comments show your name). A 🔔 button at the top right lists new thumbs up/down and comments on your own reports; tap one to open that thread. Reports for a question also appear under its explanation in the review after a test and in Browse ("Reports & discussion").',
     ] },
     { date: '2026-11-22', items: [
       'Starting a test: questions are now chosen by the six tinjauan (each in its own block, with counts), instead of the old category list. Sources are in a separate block and there is a "Reset all filters" button.',
@@ -400,7 +400,7 @@
   function setTab(tab) {
     if (tab === state.tab) return;
     state.tab = tab;
-    freshShown = {};
+    freshShown = {}; pinnedFresh = {};
     if (tab !== 'reports') storage.write(KEYS.tab, tab);
     state.scope = { cats: null, srcs: null, tj: noTj() };
     state.ui = freshUi();
@@ -1373,7 +1373,7 @@
   function tabBar() {
     return h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([id, label]) => h('button', {
       class: `tab${state.tab === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`,
-      'aria-selected': String(state.tab === id), text: id === 'reports' && state.tab !== 'reports' && freshCount() ? `${label} 🔔${freshCount()}` : label, on: { click: () => setTab(id) },
+      'aria-selected': String(state.tab === id), text: label, on: { click: () => setTab(id) },
     })));
   }
 
@@ -1771,16 +1771,18 @@
       if (!isMine(r, me)) continue;
       const o = othersOf(r); const s = seen[r.id] || { up: 0, down: 0, c: 0 };
       const d = { up: Math.max(0, o.up - s.up), down: Math.max(0, o.down - s.down), c: Math.max(0, o.c - s.c) };
-      if (d.up || d.down || d.c) out[r.id] = d;
+      if (d.c) d.items = (r.comments || []).filter((c) => c.name !== me).slice(-d.c);
+      if (d.up || d.down || d.c) { d.code = r.code; out[r.id] = d; }
     }
     return out;
   }
   const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c, 0);
-  function markSeen() {
+  function markSeen(onlyId) {
     if (!reportsCache || !reportsCache.list) return;
     const seen = seenMap(); const me = myLabel();
-    for (const r of reportsCache.list) if (isMine(r, me)) seen[r.id] = othersOf(r);
+    for (const r of reportsCache.list) if (isMine(r, me) && (!onlyId || r.id === onlyId)) seen[r.id] = othersOf(r);
     storage.write(KEYS.repseen, seen);
+    renderBell();
   }
   let freshShown = {}; // activity highlighted during this visit to the Reports tab
   let prefetched = false;
@@ -1788,8 +1790,49 @@
     if (prefetched || !REGISTRY_URL || !state.user) return;
     prefetched = true;
     if (!reportsCache) { const list = await registry.reports(); reportsCache = list ? { list } : null; }
+    renderBell();
     if (freshCount() && state.machine === 'SETUP' && state.tab !== 'reports') render();
+    setInterval(async () => {
+      if (document.hidden) return;
+      const list = await registry.reports();
+      if (list && state.tab !== 'reports') { reportsCache = { list }; renderBell(); }
+    }, 90000);
   }
+  /* ---- bell (top right): list of new thumbs up/down and comments on my reports; a click opens that thread ---- */
+  let bellEl = null; let bellOpen = false; let pendingScroll = null; let pinnedFresh = {};
+  function renderBell() {
+    if (!REGISTRY_URL || !state.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
+    if (!bellEl) { bellEl = h('div', { class: 'bell', id: 'bell' }); document.body.append(bellEl); }
+    const fa = freshActivity(); const ids = Object.keys(fa);
+    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c, 0);
+    const kids = [h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
+      on: { click: () => { bellOpen = !bellOpen; renderBell(); } } })];
+    if (bellOpen) {
+      kids.push(h('div', { class: 'bell-panel card', id: 'bell-panel' },
+        h('div', { class: 'row between' }, h('strong', { text: 'Notifications' }),
+          ids.length && h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { markSeen(); } } })),
+        ids.length ? ids.map((id) => {
+          const d = fa[id];
+          return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
+            h('strong', { text: `Your report on ${d.code}` }),
+            [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).length ? h('span', { class: 'muted', text: [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ') }) : null,
+            (d.items || []).map((c) => h('span', { class: 'muted', text: `💬 ${c.name}: ${c.text.length > 90 ? `${c.text.slice(0, 90)}…` : c.text}` })));
+        }) : h('p', { class: 'muted', text: 'No new notifications.' })));
+    }
+    bellEl.replaceChildren(...kids);
+  }
+  function goReport(id) {
+    if (state.machine !== 'SETUP') { window.alert('Finish or leave the current test first, then open the notification again.'); return; }
+    const d = freshActivity()[id];
+    if (d) pinnedFresh[id] = d;
+    markSeen(id);
+    bellOpen = false;
+    state.tab = 'reports'; state.ui = freshUi();
+    state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000 };
+    pendingScroll = id;
+    render(); renderBell();
+  }
+
 
   /** "Reports & discussion" for one question, shown under the explanation: everyone's reports with votes and comments. Loaded on first open. */
   function questionReports(q) {
@@ -1842,15 +1885,16 @@
     const reportCard = (r) => {
       const root = h('article', { class: 'card rq-item', 'data-report-id': r.id });
       const cs = { draft: '', msg: '', sending: false };
-      let nowOpen = false;
+      let nowOpen = false; let rendered = false;
       const paintOne = () => {
         const cur = state.byId.get(r.code);
         const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: 'Question now (full question, key and explanation)' }));
         if (nowOpen) now.append(cur ? h('div', {}, stemNodes(cur), staticOptions(cur, undefined, true),
           h('p', {}, h('strong', { text: 'Key now: ' }), `${letter(cur.correctIndex)}. ${cur.options[cur.correctIndex]}`), aiNote(cur), explanationNode(cur, true))
           : h('p', { class: 'muted', text: 'This question is no longer in the bank.' }));
-        now.addEventListener('toggle', () => { if (now.open && !now.querySelector('div')) paintOne(); });
-        root.replaceChildren(
+        rendered = nowOpen;
+        now.addEventListener('toggle', () => { if (now.open && !rendered) paintOne(); });
+        root.replaceChildren(...[
           h('p', {}, h('strong', { text: `${r.code} · ${stOf(r)}` }), h('span', { class: 'muted', text: ` · ${r.category}${state.byId.get(r.code) ? ` · Source: ${state.byId.get(r.code).source}` : ''} · ${r.t ? new Date(r.t).toLocaleString() : ''}` })),
           h('p', { class: 'muted', text: `Type: ${r.types}` }),
           h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
@@ -1862,7 +1906,7 @@
             h('p', { class: 'prewrap', text: r.question }), h('p', { class: 'prewrap', text: r.choices }),
             h('p', {}, h('strong', { text: 'Key then: ' }), r.key),
             r.explanation && h('p', { class: 'prewrap' }, h('strong', { text: 'Explanation then: ' }), r.explanation)),
-          voteRow(r, paintOne, cs, `rq-${r.id}`), commentBox(r, cs, paintOne, `rq-${r.id}`));
+          voteRow(r, paintOne, cs, `rq-${r.id}`), commentBox(r, cs, paintOne, `rq-${r.id}`)].filter(Boolean));
       };
       paintOne();
       return root;
@@ -1891,20 +1935,25 @@
           h('label', { class: 'field' }, h('span', { text: 'Search code / question / comment' }),
             h('input', { id: 'rp-query', type: 'text', value: st.query, autocomplete: 'off', on: { change: (ev) => { st.query = ev.target.value; st.limit = 20; paint(); } } })),
           h('p', { class: 'muted', id: 'rp-count', role: 'status', text: `${shown.length} of ${all.length} reports.` }));
-        if (!marked) { freshShown = freshActivity(); markSeen(); marked = true; }
+        freshShown = { ...freshActivity(), ...pinnedFresh };
         const nf = Object.keys(freshShown).length;
-        if (nf) kids.push(h('p', { class: 'notice ok', id: 'rp-fresh', role: 'status', text: `🔔 New activity on ${nf} of your report${nf === 1 ? '' : 's'}. Marked below.` }));
+        if (nf) kids.push(h('p', { class: 'notice ok', id: 'rp-fresh', role: 'status', text: `🔔 New activity on ${nf} of your report${nf === 1 ? '' : 's'} (marked below).` }));
         const part = shown.slice(0, st.limit);
         kids.push(h('div', { id: 'rp-list' }, part.length ? part.map(reportCard) : h('p', { class: 'muted', text: 'No reports match.' })));
         if (shown.length > part.length) kids.push(h('div', { class: 'form-actions' }, h('button', { class: 'btn', type: 'button', id: 'rp-more', text: `Show more (${shown.length - part.length} left)`, on: { click: () => { st.limit += 20; paint(); } } })));
       }
       card.replaceChildren(...kids.filter(Boolean));
+      if (pendingScroll && card.querySelector(`[data-report-id="${pendingScroll}"]`)) {
+        const id = pendingScroll; pendingScroll = null;
+        setTimeout(() => { const el = document.querySelector(`[data-report-id="${id}"]`); if (el) { el.scrollIntoView({ block: 'start' }); el.classList.add('flash'); } }, 50);
+      }
     };
     const load = async () => {
       if (!REGISTRY_URL || (reportsCache && !reportsCache.error)) return;
       reportsCache = { loading: true }; paint();
       const list = await registry.reports();
       reportsCache = list ? { list } : { error: true };
+      renderBell();
       if (state.machine === 'SETUP' && state.tab === 'reports') paint();
     };
     paint(); load();

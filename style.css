@@ -348,3 +348,9 @@ button.option.selected .letter, button.option.selected .mark { color: var(--acce
 textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; border: 1px solid var(--line, #d0d5dd); border-radius: 8px; }
 .q-reports { margin: .6rem 0; } .q-reports > summary { cursor: pointer; font-weight: 600; } .rq-item { margin: .5rem 0; }
 @media (max-width: 520px) { .tab { padding: 10px 6px; font-size: .85rem; } }
+.bell { position: fixed; top: 10px; right: 12px; z-index: 50; text-align: right; }
+.bell-btn { font: inherit; font-weight: 700; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border, #d0d7de); background: var(--card, #fff); color: inherit; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+.bell-panel { text-align: left; width: min(360px, 92vw); max-height: 70vh; overflow: auto; margin-top: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+.bell-item { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; font: inherit; padding: 8px; margin-top: 6px; border: 1px solid var(--border, #d0d7de); border-radius: 8px; background: none; color: inherit; cursor: pointer; }
+.bell-item:hover, .bell-item:focus-visible { outline: 2px solid var(--accent, #2563eb); }
+.rq-item.flash { animation: flash 2.5s ease-out; } @keyframes flash { from { box-shadow: 0 0 0 3px var(--accent, #2563eb); } to { box-shadow: 0 0 0 0 transparent; } }
