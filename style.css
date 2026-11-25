@@ -381,3 +381,11 @@ textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; bor
 details.edit-history { margin: 6px 0; font-size: .92rem; } details.edit-history > summary { cursor: pointer; font-weight: 600; }
 code { word-break: break-all; }
 .hist-item.cm { display: block; }
+.tabbar { margin-bottom: 4px; } .tabbar .tabs { margin-bottom: 6px; }
+.admin-toggle { display: inline-flex; align-items: center; gap: 6px; margin: 2px 0 10px; font-weight: 600; font-size: .9rem; cursor: pointer; }
+
+.bell-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.bell-row .admin-toggle { margin: 0; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border, #d0d7de); background: var(--card, #fff); color: inherit; box-shadow: 0 1px 4px rgba(0,0,0,.2); font-size: .8rem; white-space: nowrap; }
+.bell-tabs { display: flex; gap: 6px; margin: 6px 0; }
+.bell-tab { flex: 1; font: inherit; font-weight: 600; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border, #d0d7de); background: none; color: inherit; cursor: pointer; }
+.bell-tab.active { background: var(--accent, #2b59c3); border-color: var(--accent, #2b59c3); color: #fff; }

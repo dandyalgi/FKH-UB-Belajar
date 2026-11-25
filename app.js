@@ -12,6 +12,9 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-25', items: [
+      'Removed personal answer-key editing for regular users: only admins can edit, and their edits apply to everyone. The notification to a reporter now reads “Admin fixed this question’s answer”. Added contributor Averoes Gibraltar Makta.',
+      'The Admin mode switch is now at the top right, next to the 🔔, on every screen. Notifications are split in two: General (votes, comments, replies to you, and when an admin fixes a question you reported) and Admin (new report threads, admins only).',
+      'Admins now have an “Admin mode” switch (under the tabs, remembered on this device) to show or hide all admin tools. Report status filter: All, Open, Closed (visible to everyone) and Deleted (admins only).',
       'Admins (set by the owner) can close, reopen and delete report threads, hide comments, and edit a question (text, options, answer key, explanation) straight from a thread or from Browse. Edits are saved for everyone, marked “Edited by admin” with a visible history, and your progress is re-graded if the key changed. Admins can add other admins in the new Admin tab. Your device ID is shown on the main screen.',
       'The “View the question now / as reported” buttons in report threads are now much easier to see.',
       'Reply to a comment: tap “↩ Reply” under any comment. The person you reply to is tagged and gets a notification in the 🔔 list.',
@@ -347,7 +350,6 @@
     bank: [],
     problems: [],
     custom: [],
-    edits: Object.create(null), // { [id]: { correctIndex, explanation, aiGenerated } }
     baseById: new Map(),        // questions as stored in bank.json / imports, before edits
     questions: [],              // effective questions (base + edits)
     byId: new Map(),
@@ -373,17 +375,6 @@
     state.machine = to;
   }
 
-  function applyEdit(q) {
-    const e = state.edits[q.id];
-    if (!e || !Number.isInteger(e.correctIndex) || e.correctIndex < 0 || e.correctIndex >= q.options.length) return q;
-    return Object.freeze({
-      ...q,
-      correctIndex: e.correctIndex,
-      explanation: typeof e.explanation === 'string' ? e.explanation : q.explanation,
-      aiGenerated: e.aiGenerated === true,
-    });
-  }
-
   function rebuildQuestions() {
     const seen = new Set();
     const base = [];
@@ -392,7 +383,7 @@
     }
     const baseR = base.map(remoteOf);
     state.baseById = new Map(baseR.map((q) => [q.id, q]));
-    state.questions = baseR.map(applyEdit);
+    state.questions = baseR;
     state.byId = new Map(state.questions.map((q) => [q.id, q]));
     // The bank changed (load or import): any category/source it adds must be selectable, so go back to "all".
     state.scope = { cats: null, srcs: null, tj: noTj() };
@@ -425,7 +416,6 @@
   /* ---- persistence ---- */
   const saveProgress = () => storage.write(KEYS.progress, state.progress);
   const saveCustom = () => storage.write(KEYS.custom, state.custom.map(toPlain));
-  const saveEdits = () => storage.write(KEYS.edits, state.edits);
   function saveSession() {
     if (state.session) storage.write(KEYS.session, state.session);
     else storage.remove(KEYS.session);
@@ -496,7 +486,10 @@
   const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '' };
   let adminFlag = false;
   let editingOpen = false;
-  const isAdmin = () => adminFlag;
+  let adminOn = true;
+  try { adminOn = JSON.parse(localStorage.getItem('quiz.adminmode.v1') || 'true') !== false; } catch (_) { adminOn = true; }
+  /** Admin tools show only for admins who have Admin mode switched on (the switch is remembered on this device). */
+  const adminMode = () => adminFlag && adminOn;
   const RKEYS = 'quiz.rkeys.v1';
   async function sealJson(obj) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -544,6 +537,7 @@
       applyRemoteChange();
       if (wasAdmin !== adminFlag && state.machine === 'SETUP' && !editingOpen) render();
     }
+    renderBell();
     return true;
   }
   function applyRemoteChange() {
@@ -554,7 +548,6 @@
     if (scope) state.scope = scope;
     if (keep) Object.assign(state.ui.filter, keep);
     recomputeProgress();
-    pruneEdits();
   }
   /** A changed answer key changes what counts as correct: re-grade my last answer to each admin-edited question. */
   function recomputeProgress() {
@@ -665,31 +658,6 @@
     return out;
   }
 
-  function loadEdits() {
-    const raw = storage.read(KEYS.edits, {});
-    const out = Object.create(null);
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      for (const [id, e] of Object.entries(raw)) {
-        if (e && Number.isInteger(e.correctIndex) && typeof e.explanation === 'string') {
-          out[id] = { correctIndex: e.correctIndex, explanation: e.explanation, aiGenerated: e.aiGenerated === true };
-        }
-      }
-    }
-    return out;
-  }
-
-  /** Drops edits whose question is gone or that now match the committed bank.json. */
-  function pruneEdits() {
-    let changed = false;
-    for (const [id, e] of Object.entries(state.edits)) {
-      const base = state.baseById.get(id);
-      const same = base && e.correctIndex === base.correctIndex
-        && e.explanation === base.explanation && e.aiGenerated === base.aiGenerated;
-      if (!base || same) { delete state.edits[id]; changed = true; }
-    }
-    if (changed) saveEdits();
-  }
-
   function loadSession() {
     const raw = storage.read(KEYS.session, null);
     if (!raw || !Array.isArray(raw.ids)) return null;
@@ -760,9 +728,8 @@
         const first = await Promise.race([pr, new Promise((res) => setTimeout(() => res(null), 3500))]);
         if (first === null) pr.then(() => { applyRemoteChange(); if (state.machine === 'SETUP' && !editingOpen) render(); }).catch(() => {});
       }
-      state.edits = loadEdits();
+      storage.remove(KEYS.edits); // personal answer-key edits no longer exist: only admins edit, for everyone
       rebuildQuestions();
-      pruneEdits();
       state.progress = loadProgress();
       state.session = loadSession();
       registry.sync();
@@ -897,7 +864,6 @@
       v: 1,
       exportedAt: new Date().toISOString(),
       progress: state.progress,
-      edits: state.edits,
       custom: state.custom.map(toPlain),
     };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }));
@@ -930,18 +896,6 @@
     }
     for (const [id, v] of Object.entries(data.progress)) {
       if ((v === 'correct' || v === 'incorrect') && state.byId.has(id)) { progress[id] = v; restored++; } else skipped++;
-    }
-    if (data.edits && typeof data.edits === 'object' && !Array.isArray(data.edits)) {
-      if (replace) state.edits = Object.create(null);
-      for (const [id, e] of Object.entries(data.edits)) {
-        const base = state.baseById.get(id);
-        if (base && e && Number.isInteger(e.correctIndex) && e.correctIndex >= 0 && e.correctIndex < base.options.length && typeof e.explanation === 'string') {
-          state.edits[id] = { correctIndex: e.correctIndex, explanation: e.explanation, aiGenerated: e.aiGenerated === true };
-        }
-      }
-      rebuildQuestions();
-      pruneEdits();
-      saveEdits();
     }
     state.progress = progress;
     saveProgress();
@@ -1040,37 +994,6 @@
       h('div', { class: 'row' },
         h('button', { class: 'btn primary', type: 'button', id: 'report-send', text: d.sending ? 'Sending…' : 'Send report', disabled: d.sending, on: { click: sendReport } }),
         h('button', { class: 'btn', type: 'button', id: 'report-cancel', text: 'Cancel', on: { click: toggleReport } })));
-  }
-
-  /* ---- answer-key edits ---- */
-  function finishEdit(id, prev) {
-    saveEdits();
-    rebuildQuestions();
-    const changedKey = state.byId.get(id).correctIndex !== prev.correctIndex;
-    // A stored status was graded against the old key, so it can no longer be trusted.
-    if (changedKey && state.progress[id]) { delete state.progress[id]; saveProgress(); }
-    return { changedKey };
-  }
-
-  function saveEdit(id, edit) {
-    const base = state.baseById.get(id);
-    const prev = state.byId.get(id);
-    if (!base || !prev || !Number.isInteger(edit.correctIndex)
-        || edit.correctIndex < 0 || edit.correctIndex >= base.options.length) return { changedKey: false };
-    const next = { correctIndex: edit.correctIndex, explanation: edit.explanation, aiGenerated: edit.aiGenerated };
-    if (next.correctIndex === base.correctIndex && next.explanation === base.explanation && next.aiGenerated === base.aiGenerated) {
-      delete state.edits[id];
-    } else {
-      state.edits[id] = next;
-    }
-    return finishEdit(id, prev);
-  }
-
-  function revertEdit(id) {
-    const prev = state.byId.get(id);
-    if (!prev) return { changedKey: false };
-    delete state.edits[id];
-    return finishEdit(id, prev);
   }
 
   /* ---- question import / export ---- */
@@ -1538,10 +1461,11 @@
   const bpupkhShell = (nodes, left, right) => h('div', { class: 'shell' }, h('aside', { class: 'left' }, left), h('div', { class: 'mainCol' }, nodes), h('aside', { class: 'right' }, right));
 
   function tabBar() {
-    return h('div', { class: 'tabs', role: 'tablist' }, (isAdmin() ? [...TABS, ['admin', 'Admin']] : TABS).map(([id, label]) => h('button', {
+    const tabs = h('div', { class: 'tabs', role: 'tablist' }, (adminMode() ? [...TABS, ['admin', 'Admin']] : TABS).map(([id, label]) => h('button', {
       class: `tab${state.tab === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`,
       'aria-selected': String(state.tab === id), text: label, on: { click: () => setTab(id) },
     })));
+    return tabs;
   }
 
   function focusEmpty() {
@@ -1557,7 +1481,7 @@
 
   function viewSetup() {
     if (state.tab === 'reports') return [tabBar(), ...viewReports()];
-    if (state.tab === 'admin' && isAdmin()) return [tabBar(), ...viewAdmin()];
+    if (state.tab === 'admin' && adminMode()) return [tabBar(), ...viewAdmin()];
     const inner = viewSetupInner();
     const body = state.tab === 'focus' && !scopeQs().length && state.ui.panel !== 'manage' && state.ui.panel !== 'history'
       ? [focusEmpty()] : inner;
@@ -1593,7 +1517,7 @@
       h('p', { class: 'muted', id: 'user-line' }, state.user ? `Signed in as ${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}. ` : '',
         h('button', { class: 'linkbtn', type: 'button', id: 'change-name', text: 'Change name / university', on: { click: () => showNamePage(() => { render(); }) } })),
       state.user && h('p', { class: 'muted', id: 'device-line' }, `Device ID: `, h('code', { text: state.user.id }), ' ',
-        h('button', { class: 'linkbtn', type: 'button', id: 'copy-device', text: 'Copy', on: { click: () => { try { navigator.clipboard.writeText(state.user.id); } catch (_) { /* ignore */ } } } }), isAdmin() && ' · Admin'),
+        h('button', { class: 'linkbtn', type: 'button', id: 'copy-device', text: 'Copy', on: { click: () => { try { navigator.clipboard.writeText(state.user.id); } catch (_) { /* ignore */ } } } }), adminFlag && ` · Admin (mode ${adminOn ? 'on' : 'off'})`),
       h('p', { class: 'muted', id: 'participants', text: participantsText() })
     ));
     nodes.push(categoryTable(stats.categories));
@@ -1662,7 +1586,7 @@
           'Leave "Replace current progress" unchecked to merge with what is already there. Tick it only if you want the file to overwrite everything.',
           'Check the message that says how many questions were restored, and your progress bar.',
         ].map((t) => h('li', { text: t }))),
-        h('p', { class: 'muted', text: 'The backup contains question progress, answer-key edits and imported questions. It does not contain exam history, an exam in progress, or your name and university; those stay on the old device.' })));
+        h('p', { class: 'muted', text: 'The backup contains question progress and imported questions. It does not contain exam history, an exam in progress, or your name and university; those stay on the old device.' })));
   }
 
   function changelogCard() {
@@ -1736,49 +1660,6 @@
     const note = h('p', { class: 'muted', id: 'b-note', role: 'status' });
     let editingId = null;
 
-    const editorNode = (q) => {
-      const sel = h('select', { id: 'e-correct' },
-        q.options.map((t, i) => h('option', { value: String(i), text: `${letter(i)}. ${t}` })));
-      sel.value = String(q.correctIndex);
-      const expl = h('textarea', { id: 'e-expl' });
-      expl.value = q.explanation;
-      const ai = h('input', { id: 'e-ai', type: 'checkbox', checked: q.aiGenerated });
-      return h('div', { class: 'editor' },
-        h('label', { for: 'e-correct', text: 'Correct answer' }), sel,
-        h('label', { for: 'e-expl', text: 'Explanation' }), expl,
-        h('label', { class: 'inline-check' }, ai, 'Still AI-generated (untick once you have verified it)'),
-        h('div', { class: 'row form-actions' },
-          h('button', {
-            class: 'btn primary', type: 'button', id: 'e-save', text: 'Save',
-            on: {
-              click: () => {
-                const res = saveEdit(q.id, { correctIndex: Number(sel.value), explanation: expl.value.trim(), aiGenerated: ai.checked });
-                editingId = null;
-                note.textContent = res.changedKey
-                  ? `${q.id}: answer key changed. Its status was reset to not attempted.`
-                  : `${q.id}: saved.`;
-                paint();
-              },
-            },
-          }),
-          h('button', { class: 'btn', type: 'button', id: 'e-cancel', text: 'Cancel', on: { click: () => { editingId = null; paint(); } } }),
-          state.edits[q.id] && h('button', {
-            class: 'btn danger', type: 'button', id: 'e-revert', text: `Revert to ${BANK_URL}`,
-            on: {
-              click: () => {
-                const res = revertEdit(q.id);
-                editingId = null;
-                note.textContent = res.changedKey
-                  ? `${q.id}: reverted. Its status was reset to not attempted.`
-                  : `${q.id}: reverted.`;
-                paint();
-              },
-            },
-          })
-        )
-      );
-    };
-
     const itemNode = (q) => {
       const s = state.progress[q.id] || 'unattempted';
       const li = h('li', { class: `review-item${s === 'incorrect' ? ' wrong' : ''}` },
@@ -1786,7 +1667,6 @@
           h('span', { text: labelOf(q) }),
           h('span', { class: 'badges' },
             q.remoteEdit && h('span', { class: 'badge edited', text: 'Edited by admin' }),
-            state.edits[q.id] && h('span', { class: 'badge edited', text: 'Edited' }),
             statusBadge(s))
         ),
         stemNodes(q),
@@ -1795,10 +1675,10 @@
         f.reveal && explanationNode(q),
         f.reveal && questionReports(q)
       );
-      if (editingId === q.id) li.append(isAdmin() ? adminEditor(q, () => { editingId = null; paint(); }) : editorNode(q));
-      else {
+      if (editingId === q.id) li.append(adminEditor(q, () => { editingId = null; paint(); }));
+      else if (adminMode()) {
         li.append(h('div', { class: 'row item-actions' }, h('button', {
-          class: 'btn', type: 'button', 'data-edit': q.id, text: isAdmin() ? '✎ Edit question (admin)' : 'Edit answer key',
+          class: 'btn', type: 'button', 'data-edit': q.id, text: '✎ Edit question (admin)',
           on: { click: () => { editingId = q.id; note.textContent = ''; paint(); } },
         })));
       }
@@ -1924,12 +1804,12 @@
     };
     const me = myLabel();
     return h('div', { id: `${pre}-comments` },
-      h('h3', { text: `Comments (${(r.comments || []).length})` }),
-      h('ul', { class: 'hist-list' }, (r.comments || []).length
-        ? r.comments.map((c) => { const rp = replyOf(c.text); return h('li', { class: 'hist-item cm' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
+      h('h3', { text: `Comments (${(r.comments || []).filter((c) => !c.hidden || adminMode()).length})` }),
+      h('ul', { class: 'hist-list' }, (r.comments || []).some((c) => !c.hidden || adminMode())
+        ? r.comments.filter((c) => !c.hidden || adminMode()).map((c) => { const rp = replyOf(c.text); return h('li', { class: 'hist-item cm' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
           h('p', { class: 'prewrap' }, rp.to && h('span', { class: `mention${rp.to === me ? ' me' : ''}`, text: `@${rp.to}` }), rp.to && ' ', rp.text),
           c.hidden && h('p', { class: 'muted', text: '(hidden from users)' }),
-          isAdmin() && c.cid && h('button', { class: 'btn reply-btn', type: 'button', text: c.hidden ? 'Unhide' : 'Hide', on: { click: async () => { const res = await adminPost({ action: 'ahide', app: 'quiz', id: r.id, cid: c.cid, hide: !c.hidden }); if (res) { c.hidden = !c.hidden; paint(); } } } }),
+          adminMode() && c.cid && h('button', { class: 'btn reply-btn', type: 'button', text: c.hidden ? 'Unhide' : 'Hide', on: { click: async () => { const res = await adminPost({ action: 'ahide', app: 'quiz', id: r.id, cid: c.cid, hide: !c.hidden }); if (res) { c.hidden = !c.hidden; paint(); } } } }),
           c.name !== me && h('button', { class: 'btn reply-btn', type: 'button', text: '↩ Reply', on: { click: () => { st.replyTo = c.name; paint(); const t = document.getElementById(`${pre}-ctext`); if (t) t.focus(); } } })); })
         : [h('li', { class: 'muted', text: 'No comments yet.' })]),
       st.msg && h('p', { class: 'notice err', role: 'alert', text: st.msg }),
@@ -1945,7 +1825,10 @@
   const seenMap = () => { const m = storage.read(KEYS.repseen, {}); return m && typeof m === 'object' ? m : {}; };
   const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)),
     c: (r.comments || []).filter((c) => c.name !== myLabel()).length,
-    m: (r.comments || []).filter((c) => c.name !== myLabel() && replyOf(c.text).to === myLabel()).length });
+    m: (r.comments || []).filter((c) => c.name !== myLabel() && replyOf(c.text).to === myLabel()).length,
+    e: editsFor(r).length });
+  /** Admin edits of the reported question made after the report was sent (not by me). */
+  const editsFor = (r) => (remote.hist.get(r.code) || []).filter((e) => e.kind === 'edit' && (e.t || 0) > (r.t || 0) && e.by !== myLabel());
   /** New activity on each of my reports: { [id]: { up, down, c } } with only positive differences. */
   function freshActivity() {
     const out = {};
@@ -1953,10 +1836,11 @@
     const seen = seenMap(); const me = myLabel();
     for (const r of reportsCache.list) {
       if (!isMine(r, me)) continue;
-      const o = othersOf(r); const s = seen[r.id] || { up: 0, down: 0, c: 0, m: 0 };
-      const d = { up: Math.max(0, o.up - s.up), down: Math.max(0, o.down - s.down), c: Math.max(0, o.c - s.c), m: 0 };
+      const o = othersOf(r); const s = seen[r.id] || { up: 0, down: 0, c: 0, m: 0, e: 0 };
+      const d = { up: Math.max(0, o.up - s.up), down: Math.max(0, o.down - s.down), c: Math.max(0, o.c - s.c), m: 0, ed: Math.max(0, o.e - (s.e || 0)) };
+      if (d.ed) d.edits = editsFor(r).slice(-d.ed);
       if (d.c) d.items = (r.comments || []).filter((c) => c.name !== me).slice(-d.c);
-      if (d.up || d.down || d.c) { d.code = r.code; d.mine = true; out[r.id] = d; }
+      if (d.up || d.down || d.c || d.ed) { d.code = r.code; d.mine = true; out[r.id] = d; }
     }
     for (const r of reportsCache.list) {
       if (isMine(r, me)) continue;
@@ -1966,7 +1850,7 @@
     }
     return out;
   }
-  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m, 0);
+  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m + (d.ed || 0), 0);
   function markSeen(onlyId) {
     if (!reportsCache || !reportsCache.list) return;
     const seen = seenMap(); const me = myLabel();
@@ -1992,23 +1876,59 @@
     }, 90000);
   }
   /* ---- bell (top right): list of new thumbs up/down and comments on my reports; a click opens that thread ---- */
+  /** Admin notifications: new report threads from other people (watermark + read list, per device). */
+  const ADMSEEN = 'quiz.adminseen.v1';
+  let bellTab = 'general';
+  function adminFresh() {
+    if (!adminMode() || !reportsCache || !reportsCache.list) return [];
+    const list = reportsCache.list.filter((r) => !r.deleted);
+    let sn = storage.read(ADMSEEN, null);
+    if (!sn || typeof sn !== 'object') { sn = { base: list.reduce((m, r) => Math.max(m, r.t || 0), 0), read: [] }; storage.write(ADMSEEN, sn); return []; }
+    const read = Array.isArray(sn.read) ? sn.read : [];
+    return list.filter((r) => (r.t || 0) > (sn.base || 0) && !read.includes(r.id) && !isMine(r, myLabel())).sort((a, b) => b.t - a.t);
+  }
+  function adminMark(id) {
+    const sn = storage.read(ADMSEEN, null) || { base: 0, read: [] };
+    if (!Array.isArray(sn.read)) sn.read = [];
+    if (id) { if (!sn.read.includes(id)) sn.read.push(id); }
+    else { sn.base = ((reportsCache && reportsCache.list) || []).reduce((m, r) => Math.max(m, r.t || 0), sn.base || 0); sn.read = []; }
+    storage.write(ADMSEEN, sn);
+    renderBell();
+  }
   let bellEl = null; let bellOpen = false; let pendingScroll = null; let pinnedFresh = {};
   function renderBell() {
     if (!REGISTRY_URL || !state.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
     if (!bellEl) { bellEl = h('div', { class: 'bell', id: 'bell' }); document.body.append(bellEl); }
     const fa = freshActivity(); const ids = Object.keys(fa);
-    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m, 0);
-    const kids = [h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
-      on: { click: () => { bellOpen = !bellOpen; renderBell(); } } })];
+    const afr = adminFresh();
+    if (bellTab === 'admin' && !adminMode()) bellTab = 'general';
+    const nGen = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m + (fa[id].ed || 0), 0);
+    const n = nGen + afr.length;
+    const toggle = adminFlag && h('label', { class: 'admin-toggle', for: 'admin-mode' },
+      h('input', { type: 'checkbox', id: 'admin-mode', checked: adminOn, on: { change: (ev) => {
+        adminOn = ev.target.checked;
+        try { localStorage.setItem('quiz.adminmode.v1', JSON.stringify(adminOn)); } catch (_) { /* ignore */ }
+        if (!adminOn && state.tab === 'admin') state.tab = 'all';
+        if (state.machine === 'SETUP') render();
+        renderBell();
+      } } }), ' 🛠 Admin mode');
+    const kids = [h('div', { class: 'bell-row' }, toggle, h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
+      on: { click: () => { bellOpen = !bellOpen; renderBell(); } } }))];
     if (bellOpen) {
+      const tabBtn = (id, text) => h('button', { class: `bell-tab${bellTab === id ? ' active' : ''}`, type: 'button', id: `bell-tab-${id}`, text, on: { click: () => { bellTab = id; renderBell(); } } });
+      const adminItem = (r) => h('button', { class: 'bell-item', type: 'button', 'data-anotif': r.id, on: { click: () => { adminMark(r.id); goReport(r.id); } } },
+        h('strong', { text: `🆕 New thread on ${r.code}` }), h('span', { class: 'muted', text: `${r.types} · ${r.by || 'Unknown'}` }));
       kids.push(h('div', { class: 'bell-panel card', id: 'bell-panel' },
         h('div', { class: 'row between' }, h('strong', { text: 'Notifications' }),
-          ids.length && h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { markSeen(); } } })),
+          (bellTab === 'admin' ? afr.length : ids.length) ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { if (bellTab === 'admin') adminMark(); else markSeen(); } } }) : null),
+        adminMode() && h('div', { class: 'bell-tabs' }, tabBtn('general', `General${nGen ? ` (${nGen})` : ''}`), tabBtn('admin', `Admin${afr.length ? ` (${afr.length})` : ''}`)),
+        bellTab === 'admin' ? (afr.length ? afr.map(adminItem) : h('p', { class: 'muted', text: 'No new threads.' })) :
         ids.length ? ids.map((id) => {
           const d = fa[id];
           return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
             h('strong', { text: d.mine ? `Your report on ${d.code}` : `Reply to you on ${d.code}` }),
             [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).length ? h('span', { class: 'muted', text: [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ') }) : null,
+            (d.edits || []).map((e) => h('span', { class: 'muted', text: '✅ Admin fixed this question’s answer' })),
             (d.items || []).map((c) => { const t = replyOf(c.text).text; return h('span', { class: 'muted', text: `💬 ${c.name}${replyOf(c.text).to === myLabel() ? ' replied to you' : ''}: ${t.length > 90 ? `${t.slice(0, 90)}…` : t}` }); }));
         }) : h('p', { class: 'muted', text: 'No new notifications.' })));
     }
@@ -2080,7 +2000,7 @@
       const cs = { draft: '', msg: '', sending: false };
       let nowOpen = false; let rendered = false;
       const adminBar = () => {
-        if (!isAdmin()) return null;
+        if (!adminMode()) return null;
         const closed = stOf(r) !== 'Open';
         const noteIn = h('input', { type: 'text', maxlength: '300', id: `rq-${r.id}-note`, placeholder: 'Admin note (shown to everyone)' });
         noteIn.value = r.note || '';
@@ -2115,7 +2035,7 @@
           h('p', {}, h('strong', { text: `${r.code} · ${stOf(r)}` }), h('span', { class: 'muted', text: ` · ${r.category}${state.byId.get(r.code) ? ` · Source: ${state.byId.get(r.code).source}` : ''} · ${r.t ? new Date(r.t).toLocaleString() : ''}` })),
           h('p', { class: 'muted', text: `Type: ${r.types}` }),
           h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
-          freshShown[r.id] && h('p', { class: 'notice ok', 'data-fresh': r.id, text: `🔔 New on your report: ${[freshShown[r.id].up && `+${freshShown[r.id].up} 👍`, freshShown[r.id].down && `+${freshShown[r.id].down} 👎`, freshShown[r.id].c && `+${freshShown[r.id].c} comment${freshShown[r.id].c === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}` }),
+          freshShown[r.id] && h('p', { class: 'notice ok', 'data-fresh': r.id, text: `🔔 New on your report: ${[freshShown[r.id].up && `+${freshShown[r.id].up} 👍`, freshShown[r.id].down && `+${freshShown[r.id].down} 👎`, freshShown[r.id].c && `+${freshShown[r.id].c} comment${freshShown[r.id].c === 1 ? '' : 's'}`, freshShown[r.id].ed && '✅ fixed by admin'].filter(Boolean).join(' · ')}` }),
           r.comment && h('p', { class: 'muted' }, h('strong', { text: 'Comment: ' }), r.comment),
           r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
           now,
@@ -2136,18 +2056,19 @@
       else if (reportsCache.error) kids.push(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports. Check your connection (the sheet script must be updated and redeployed).' }),
         h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { reportsCache = null; load(); } } }));
       else {
-        const all = reportsCache.list;
-        const statuses = sortedUnique(all.map(stOf));
+        const all = reportsCache.list.filter((r) => !r.deleted || adminMode());
+        if (st.status === 'Deleted' && !adminMode()) st.status = 'all';
+        const statusOk = (r) => st.status === 'all' || (st.status === 'Deleted' ? !!r.deleted : !r.deleted && (st.status === 'Open' ? stOf(r) === 'Open' : stOf(r) !== 'Open'));
         const types = sortedUnique(all.flatMap(typesOf));
         const qq = st.query.trim().toLowerCase();
-        const shown = all.filter((r) => (st.status === 'all' || stOf(r) === st.status) && (st.type === 'all' || typesOf(r).includes(st.type))
+        const shown = all.filter((r) => statusOk(r) && (st.type === 'all' || typesOf(r).includes(st.type))
           && (!qq || (r.code + ' ' + r.question + ' ' + r.comment).toLowerCase().includes(qq))).sort(cmp[st.sort] || cmp.new);
         const sel = (id, label, cur, opts, onc, labels) => h('label', { class: 'field' }, h('span', { text: label }),
           h('select', { id, on: { change: (ev) => { onc(ev.target.value); st.limit = 20; paint(); } } },
             opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
         kids.push(h('div', { class: 'row' },
           sel('rp-sort', 'Sort by', st.sort, SORTS, (v) => { st.sort = v; }),
-          sel('rp-status', 'Status', st.status, [['all', 'All'], ...statuses.map((x) => [x, x])], (v) => { st.status = v; }),
+          sel('rp-status', 'Status', st.status, [['all', 'All'], ['Open', 'Open'], ['Closed', 'Closed'], ...(adminMode() ? [['Deleted', 'Deleted (admins only)']] : [])], (v) => { st.status = v; }),
           sel('rp-type', 'Type of error', st.type, [['all', 'All'], ...types.map((x) => [x, x])], (v) => { st.type = v; })),
           h('label', { class: 'field' }, h('span', { text: 'Search code / question / comment' }),
             h('input', { id: 'rp-query', type: 'text', value: st.query, autocomplete: 'off', on: { change: (ev) => { st.query = ev.target.value; st.limit = 20; paint(); } } })),
@@ -2352,8 +2273,7 @@
       h('section', { class: 'card' },
         h('h2', { text: 'Save to your site' }),
         h('p', { id: 'bank-info', text: `${state.questions.length} questions total, ${localCount} imported in this browser and not yet in ${BANK_URL}.` }),
-        h('p', { id: 'edits-info', text: `${Object.keys(state.edits).length} answer-key edit(s) made in this browser and not yet in ${BANK_URL}.` }),
-        h('p', { class: 'muted', text: `Download the merged file (it includes your answer-key edits), replace ${BANK_URL} in your repository, and commit. Local imports and edits are cleaned up automatically once they appear in the committed file.` }),
+        h('p', { class: 'muted', text: `Download the merged file (it includes the admin edits), replace ${BANK_URL} in your repository, and commit. Local imports are cleaned up automatically once they appear in the committed file.` }),
         h('div', { class: 'row' },
           h('button', { class: 'btn primary', type: 'button', id: 'export', text: `Download updated ${BANK_URL}`, on: { click: exportBank } }),
           h('button', {

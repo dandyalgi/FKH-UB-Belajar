@@ -9,6 +9,7 @@ window.BPUPKH_CONTRIBUTORS = [
   { name: 'Nafthaly Deva Marvela Kalesaran' },
   { name: 'Maulana Ahmad Arif' },
   { name: 'Maria Divavenus', uni: 'UGM' },
+  { name: 'Averoes Gibraltar Makta' },
   { name: 'Paw3r Rangers', members: [
     'Andika Refa Pradana',
     'Titania Dhea Afrisca Pricilia',
