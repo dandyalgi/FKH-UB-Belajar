@@ -19,5 +19,7 @@ input[type=password]{width:100%;font:inherit;padding:9px 10px;border-radius:8px;
 @media(min-width:1000px){.shell{grid-template-columns:230px minmax(0,1fr) 290px}.shell>aside{position:sticky;top:12px}.shell>.left{order:-1}}
 @media(max-width:999px){.shell>.right{order:2}.shell>.left{order:3}}
 .sel{flex-wrap:wrap}.sel select{min-width:0;max-width:100%;flex:1 1 12rem}
-.reminder{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:100;display:flex;gap:1rem;align-items:center;padding:.7rem 1.2rem;border-radius:12px;background:#b45309;color:#fff;font-size:1.15rem;box-shadow:0 6px 24px rgba(0,0,0,.35)}
-.reminder .linkbtn{color:#fff}
+.contrib-group summary{cursor:pointer}
+.contrib-group summary b{display:inline}
+.contrib-members{list-style:none;margin:6px 0 0;padding:0 0 0 12px;display:grid;gap:4px;font-size:.92rem}
+.contrib-list .contrib-members li{padding:0;border:0}
