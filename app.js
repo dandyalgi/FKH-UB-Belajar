@@ -12,6 +12,7 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-27', items: [
+      'The question bank is split over several files (bank.enc, bank.2.enc, bank.3.enc) so each stays under GitHub’s 25 MB upload limit. The app joins them automatically.',
       'Added 200 questions: Tryout External 2 UKMPPDH Batch 8 (100) and Tryout External 1 UKMPPDH Batch 50 (100), with explanations and images.',
     ] },
     { date: '2026-11-25', items: [
@@ -703,16 +704,28 @@
   }
 
   /* ---- loading ---- */
+  /** The bank may be split over several files (bank.enc, bank.2.enc, ...) to stay under GitHub's 25 MB upload limit. */
+  const partName = (k) => (k <= 1 ? BANK_URL : BANK_URL.replace(/\.enc$/, `.${k}.enc`));
   async function fetchEnvelope() {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS * 3);
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS * 6);
+    const getPart = async (k) => {
+      const res = await fetch(partName(k), { cache: 'no-cache', signal: ctrl.signal });
+      if (!res.ok) throw new DataError(`Could not load ${partName(k)} (HTTP ${res.status}).`);
+      try { return await res.json(); }
+      catch (_) { throw new DataError(`${partName(k)} is not valid.`); }
+    };
     try {
-      const res = await fetch(BANK_URL, { cache: 'no-cache', signal: ctrl.signal });
-      if (!res.ok) throw new DataError(`Could not load ${BANK_URL} (HTTP ${res.status}).`);
-      let env;
-      try { env = await res.json(); }
-      catch (_) { throw new DataError(`${BANK_URL} is not valid.`); }
+      const env = await getPart(1);
       if (!env || !env.salt || !env.iv || !env.ct || !Number.isInteger(env.iter)) throw new DataError(`${BANK_URL} is not valid.`);
+      const parts = Number.isInteger(env.parts) && env.parts > 1 && env.parts <= 50 ? env.parts : 1;
+      if (parts > 1) {
+        const rest = await Promise.all(Array.from({ length: parts - 1 }, (_, i) => getPart(i + 2)));
+        rest.forEach((p, i) => {
+          if (!p || typeof p.ct !== 'string' || p.set !== env.set) throw new DataError(`${partName(i + 2)} does not match ${BANK_URL}. The files are probably being updated; retry in a minute.`);
+        });
+        env.ct = env.ct + rest.map((p) => p.ct).join('');
+      }
       return env;
     } catch (err) {
       if (err instanceof DataError) throw err;
@@ -1074,12 +1087,24 @@
   async function exportBank() {
     if (!state.key || !state.env) return;
     const env = await encryptBank(state.env, state.key, state.questions.map(toPlain));
-    const url = URL.createObjectURL(new Blob([JSON.stringify(env)], { type: 'application/json' }));
-    const a = h('a', { href: url, download: 'bank.enc' });
-    document.body.append(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // split like encrypt-bank.js does (chunks of 12,000,000 characters, always a multiple of 4)
+    const SIZE = 12000000;
+    const n = Math.max(1, Math.ceil(env.ct.length / SIZE));
+    const set = Array.from(crypto.getRandomValues(new Uint8Array(4)), (x) => x.toString(16).padStart(2, '0')).join('');
+    const files = [];
+    for (let k = 1; k <= n; k++) {
+      const ct = env.ct.slice((k - 1) * SIZE, k * SIZE);
+      files.push({ name: partName(k), json: k === 1 ? (n > 1 ? { v: 1, iter: env.iter, salt: env.salt, iv: env.iv, parts: n, set, ct } : env) : { v: 1, part: k, set, ct } });
+    }
+    for (const f of files) {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(f.json)], { type: 'application/json' }));
+      const a = h('a', { href: url, download: f.name });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      if (files.length > 1) await new Promise((r) => setTimeout(r, 600));
+    }
   }
 
   /* ======================================================================
@@ -2368,7 +2393,7 @@
       h('section', { class: 'card' },
         h('h2', { text: 'Save to your site' }),
         h('p', { id: 'bank-info', text: `${state.questions.length} questions total, ${localCount} imported in this browser and not yet in ${BANK_URL}.` }),
-        h('p', { class: 'muted', text: `Download the merged file (it includes the admin edits), replace ${BANK_URL} in your repository, and commit. Local imports are cleaned up automatically once they appear in the committed file.` }),
+        h('p', { class: 'muted', text: `Download the merged file (it includes the admin edits), replace ${BANK_URL} (and bank.2.enc, bank.3.enc, ... if it was downloaded in several files) in your repository, and commit. Local imports are cleaned up automatically once they appear in the committed file.` }),
         h('div', { class: 'row' },
           h('button', { class: 'btn primary', type: 'button', id: 'export', text: `Download updated ${BANK_URL}`, on: { click: exportBank } }),
           h('button', {
