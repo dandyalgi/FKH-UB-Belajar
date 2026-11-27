@@ -11,7 +11,12 @@
   const REGISTRY_URL = String((window.QUIZ_CONFIG && window.QUIZ_CONFIG.registryUrl) || '');
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
+    { date: '2026-11-27', items: [
+      'Added 200 questions: Tryout External 2 UKMPPDH Batch 8 (100) and Tryout External 1 UKMPPDH Batch 50 (100), with explanations and images.',
+    ] },
     { date: '2026-11-25', items: [
+      'Saving an admin edit now waits up to 25 seconds for the server and explains why a save failed (too slow, not an admin, or script not updated).',
+      'Notifications are now General (new threads from other people) and My threads (activity on your reports and on threads where you commented, including replies to you). Reports & Discussion has a “My threads” filter.',
       'Lighter on the server: the Reports list and admin edits are only downloaded again when they changed, checks run every few minutes and only while the tab is open, and votes or comments that fail to send are kept on your device and retried automatically.',
       'Removed personal answer-key editing for regular users: only admins can edit, and their edits apply to everyone. The notification to a reporter now reads “Admin fixed this question’s answer”. Added contributor Averoes Gibraltar Makta.',
       'The Admin mode switch is now at the top right, next to the 🔔, on every screen. Notifications are split in two: General (votes, comments, replies to you, and when an admin fixes a question you reported) and Admin (new report threads, admins only).',
@@ -450,14 +455,17 @@
   const registry = {
     async call(init, query) {
       if (!REGISTRY_URL) return null;
+      const { timeoutMs, ...opts } = init || {};
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 8000);
+      const timer = setTimeout(() => { this.why = 'timeout'; ctrl.abort(); }, timeoutMs || 8000);
+      this.why = '';
       try {
-        const res = await fetch(query ? `${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}${query}` : REGISTRY_URL, { ...init, signal: ctrl.signal, redirect: 'follow' });
+        const res = await fetch(query ? `${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}${query}` : REGISTRY_URL, { ...opts, signal: ctrl.signal, redirect: 'follow' });
         const data = await res.json();
         if (data && data.conflict) return { ok: false, conflict: true };
+        if (!(data && data.ok)) this.why = data && data.denied ? 'denied' : 'server';
         return data && data.ok ? data : null;
-      } catch (_) { return null; } finally { clearTimeout(timer); }
+      } catch (_) { if (this.why !== 'timeout') this.why = 'network'; return null; } finally { clearTimeout(timer); }
     },
     /** Upsert this participant (also counts a visit). Never blocks the app; failures are retried on the next start. */
     async sync() {
@@ -466,7 +474,7 @@
       if (data && Number.isInteger(data.count)) setParticipants(data.count);
     },
     /** The server answers {unchanged:true} when the shared list has not changed since our token: then we keep the list we already hold. */
-    rv: '', ra: '', rl: null,
+    why: '', rv: '', ra: '', rl: null,
     async reports() {
       const since = this.rv && this.rl ? `&since=${encodeURIComponent(this.rv)}&adm=${this.ra}` : '';
       const data = await this.call({ method: 'GET' }, `action=reports&device=${encodeURIComponent(state.user ? state.user.id : '')}${since}`);
@@ -580,7 +588,7 @@
     if (changed) saveProgress();
     storage.write(RKEYS, [...remote.cur.keys()]);
   }
-  const adminPost = (body) => registry.call({ method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, device: state.user.id, editor: myLabel() }) });
+  const adminPost = (body) => registry.call({ timeoutMs: 25000, method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, device: state.user.id, editor: myLabel() }) });
 
   /** Edit history of one question (visible to everyone). */
   function editInfo(q) {
@@ -630,7 +638,7 @@
       const p = await sealJson({ kind, set, before, note: note.value.trim() });
       const res = await adminPost({ action: 'aedit', app: 'quiz', item: q.id, kind, rev: remote.rev.get(q.id) || 0, p });
       saveBtn.disabled = false; if (revBtn) revBtn.disabled = false;
-      if (!res) { show('Could not save. Check your connection and that the sheet script is updated and redeployed.'); return; }
+      if (!res) { show('Could not save. ' + (registry.why === 'timeout' ? 'The server took too long to answer (the change may still have been saved: reload in a minute and check before trying again).' : registry.why === 'denied' ? 'The server says this device is not an admin. Check that your device ID is in the Admins list and the script is the latest deployed version.' : registry.why === 'server' ? 'The server refused the change. Make sure the sheet script is updated and redeployed as a new version.' : 'Check your connection.')); return; }
       if (res.conflict) { await loadRemote(true); show('Another admin edited this question in the meantime. The latest version is loaded: close and open the editor again.'); return; }
       await loadRemote(true);
       close(true);
@@ -1814,6 +1822,7 @@
       st.sending = false;
       if (!res) { st.msg = 'Could not send the comment. Try again.'; paint(); return; }
       (r.comments || (r.comments = [])).push({ t: Date.now(), name, text });
+      if (!isMine(r, myLabel())) { const sm = seenMap(); if (!sm[r.id]) { sm[r.id] = { ...othersOf(r), c: Math.max(0, othersOf(r).c) }; storage.write(KEYS.repseen, sm); } }
       st.draft = ''; st.msg = ''; st.replyTo = ''; paint();
     };
     const me = myLabel();
@@ -1836,6 +1845,8 @@
   const myLabel = () => (state.user ? `${state.user.name}${state.user.university ? ` (${state.user.university})` : ''}` : '');
   /** Mine = the report's device ID matches this device; reports without a stored device ID fall back to name + university. */
   const isMine = (r, me) => (r.dev ? r.own : r.by === me);
+  /** A thread of someone else where I have written a comment. */
+  const participated = (r, me) => !isMine(r, me) && (r.comments || []).some((c) => c.name === me);
   const seenMap = () => { const m = storage.read(KEYS.repseen, {}); return m && typeof m === 'object' ? m : {}; };
   const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)),
     c: (r.comments || []).filter((c) => c.name !== myLabel()).length,
@@ -1856,19 +1867,30 @@
       if (d.c) d.items = (r.comments || []).filter((c) => c.name !== me).slice(-d.c);
       if (d.up || d.down || d.c || d.ed) { d.code = r.code; d.mine = true; out[r.id] = d; }
     }
+    let init = false;
     for (const r of reportsCache.list) {
-      if (isMine(r, me)) continue;
-      const o = othersOf(r); const s = seen[r.id] || { m: 0 };
+      if (isMine(r, me) || r.deleted) continue;
+      const o = othersOf(r);
+      if (participated(r, me)) {
+        // Threads I commented on: new comments from other people. The first time we see such a thread it only sets the starting point (no flood of old comments).
+        if (!seen[r.id]) { seen[r.id] = o; init = true; continue; }
+        const s = seen[r.id];
+        const c = Math.max(0, o.c - (s.c === undefined ? o.c : s.c));
+        if (c) { out[r.id] = { up: 0, down: 0, c, m: 0, items: (r.comments || []).filter((x) => x.name !== me).slice(-c), code: r.code, mine: false, part: true }; }
+        continue;
+      }
+      const s = seen[r.id] || { m: 0 };
       const m = Math.max(0, o.m - (s.m || 0));
       if (m) { const ms = (r.comments || []).filter((c) => c.name !== me && replyOf(c.text).to === me).slice(-m); out[r.id] = { up: 0, down: 0, c: 0, m, items: ms, code: r.code, mine: false }; }
     }
+    if (init) storage.write(KEYS.repseen, seen);
     return out;
   }
   const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m + (d.ed || 0), 0);
   function markSeen(onlyId) {
     if (!reportsCache || !reportsCache.list) return;
     const seen = seenMap(); const me = myLabel();
-    for (const r of reportsCache.list) { const o = othersOf(r); if ((isMine(r, me) || o.m) && (!onlyId || r.id === onlyId)) seen[r.id] = o; }
+    for (const r of reportsCache.list) { const o = othersOf(r); if ((isMine(r, me) || participated(r, me) || o.m) && (!onlyId || r.id === onlyId)) seen[r.id] = o; }
     storage.write(KEYS.repseen, seen);
     renderBell();
   }
@@ -1939,31 +1961,37 @@
   /** Admin notifications: new report threads from other people (watermark + read list, per device). */
   const ADMSEEN = 'quiz.adminseen.v1';
   let bellTab = 'general';
-  function adminFresh() {
-    if (!adminMode() || !reportsCache || !reportsCache.list) return [];
+  const NEWSEEN = 'quiz.newseen.v1';
+  /** New threads from other people (watermark + read list, per device). Admins with Admin mode on see them in the Admin tab, everyone else in General. */
+  function freshThreads(key) {
+    if (!reportsCache || !reportsCache.list) return [];
     const list = reportsCache.list.filter((r) => !r.deleted);
-    let sn = storage.read(ADMSEEN, null);
-    if (!sn || typeof sn !== 'object') { sn = { base: list.reduce((m, r) => Math.max(m, r.t || 0), 0), read: [] }; storage.write(ADMSEEN, sn); return []; }
+    let sn = storage.read(key, null);
+    if (!sn || typeof sn !== 'object') { sn = { base: list.reduce((m, r) => Math.max(m, r.t || 0), 0), read: [] }; storage.write(key, sn); return []; }
     const read = Array.isArray(sn.read) ? sn.read : [];
     return list.filter((r) => (r.t || 0) > (sn.base || 0) && !read.includes(r.id) && !isMine(r, myLabel())).sort((a, b) => b.t - a.t);
   }
-  function adminMark(id) {
-    const sn = storage.read(ADMSEEN, null) || { base: 0, read: [] };
+  function markThreads(key, id) {
+    const sn = storage.read(key, null) || { base: 0, read: [] };
     if (!Array.isArray(sn.read)) sn.read = [];
     if (id) { if (!sn.read.includes(id)) sn.read.push(id); }
     else { sn.base = ((reportsCache && reportsCache.list) || []).reduce((m, r) => Math.max(m, r.t || 0), sn.base || 0); sn.read = []; }
-    storage.write(ADMSEEN, sn);
+    storage.write(key, sn);
     renderBell();
   }
+  const adminFresh = () => (adminMode() ? freshThreads(ADMSEEN) : []);
+  const adminMark = (id) => markThreads(ADMSEEN, id);
+  const newFresh = () => (adminMode() ? [] : freshThreads(NEWSEEN));
+  const newMark = (id) => markThreads(NEWSEEN, id);
   let bellEl = null; let bellOpen = false; let pendingScroll = null; let pinnedFresh = {};
   function renderBell() {
     if (!REGISTRY_URL || !state.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
     if (!bellEl) { bellEl = h('div', { class: 'bell', id: 'bell' }); document.body.append(bellEl); }
     const fa = freshActivity(); const ids = Object.keys(fa);
-    const afr = adminFresh();
+    const afr = adminFresh(); const nfr = newFresh();
     if (bellTab === 'admin' && !adminMode()) bellTab = 'general';
     const nGen = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m + (fa[id].ed || 0), 0);
-    const n = nGen + afr.length;
+    const n = nGen + afr.length + nfr.length;
     const toggle = adminFlag && h('label', { class: 'admin-toggle', for: 'admin-mode' },
       h('input', { type: 'checkbox', id: 'admin-mode', checked: adminOn, on: { change: (ev) => {
         adminOn = ev.target.checked;
@@ -1978,19 +2006,23 @@
       const tabBtn = (id, text) => h('button', { class: `bell-tab${bellTab === id ? ' active' : ''}`, type: 'button', id: `bell-tab-${id}`, text, on: { click: () => { bellTab = id; renderBell(); } } });
       const adminItem = (r) => h('button', { class: 'bell-item', type: 'button', 'data-anotif': r.id, on: { click: () => { adminMark(r.id); goReport(r.id); } } },
         h('strong', { text: `🆕 New thread on ${r.code}` }), h('span', { class: 'muted', text: `${r.types} · ${r.by || 'Unknown'}` }));
+      const newItem = (r) => h('button', { class: 'bell-item', type: 'button', 'data-nnotif': r.id, on: { click: () => { newMark(r.id); goReport(r.id); } } },
+        h('strong', { text: `🆕 New thread on ${r.code}` }), h('span', { class: 'muted', text: `${r.types} · ${r.by || 'Unknown'}` }));
+      const cnt = bellTab === 'admin' ? afr.length : bellTab === 'mine' ? ids.length : nfr.length;
       kids.push(h('div', { class: 'bell-panel card', id: 'bell-panel' },
         h('div', { class: 'row between' }, h('strong', { text: 'Notifications' }),
-          (bellTab === 'admin' ? afr.length : ids.length) ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { if (bellTab === 'admin') adminMark(); else markSeen(); } } }) : null),
-        adminMode() && h('div', { class: 'bell-tabs' }, tabBtn('general', `General${nGen ? ` (${nGen})` : ''}`), tabBtn('admin', `Admin${afr.length ? ` (${afr.length})` : ''}`)),
+          cnt ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { if (bellTab === 'admin') adminMark(); else if (bellTab === 'mine') markSeen(); else newMark(); } } }) : null),
+        h('div', { class: 'bell-tabs' }, tabBtn('general', `General${nfr.length ? ` (${nfr.length})` : ''}`), tabBtn('mine', `My threads${nGen ? ` (${nGen})` : ''}`), adminMode() && tabBtn('admin', `Admin${afr.length ? ` (${afr.length})` : ''}`)),
         bellTab === 'admin' ? (afr.length ? afr.map(adminItem) : h('p', { class: 'muted', text: 'No new threads.' })) :
+        bellTab === 'general' ? (nfr.length ? nfr.map(newItem) : h('p', { class: 'muted', text: 'No new threads.' })) :
         ids.length ? ids.map((id) => {
           const d = fa[id];
           return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
-            h('strong', { text: d.mine ? `Your report on ${d.code}` : `Reply to you on ${d.code}` }),
+            h('strong', { text: d.mine ? `Your report on ${d.code}` : d.part ? `New comments on ${d.code} (you commented)` : `Reply to you on ${d.code}` }),
             [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).length ? h('span', { class: 'muted', text: [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ') }) : null,
             (d.edits || []).map((e) => h('span', { class: 'muted', text: '✅ Admin fixed this question’s answer' })),
             (d.items || []).map((c) => { const t = replyOf(c.text).text; return h('span', { class: 'muted', text: `💬 ${c.name}${replyOf(c.text).to === myLabel() ? ' replied to you' : ''}: ${t.length > 90 ? `${t.slice(0, 90)}…` : t}` }); }));
-        }) : h('p', { class: 'muted', text: 'No new notifications.' })));
+        }) : h('p', { class: 'muted', text: 'No new activity on your threads.' })));
     }
     bellEl.replaceChildren(...kids);
   }
@@ -2001,7 +2033,7 @@
     markSeen(id);
     bellOpen = false;
     state.tab = 'reports'; state.ui = freshUi();
-    state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000 };
+    state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000, scope: 'all' };
     pendingScroll = id;
     render(); renderBell();
   }
@@ -2042,7 +2074,7 @@
     return det;
   }
   function viewReports() {
-    const st = state.ui.rep || (state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20 });
+    const st = state.ui.rep || (state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20, scope: 'all' });
     const card = h('section', { class: 'card', id: 'reports' });
     let marked = false;
     const stOf = (r) => (r.status || '').trim() || 'Open';
@@ -2116,7 +2148,8 @@
       else if (reportsCache.error) kids.push(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports. Check your connection (the sheet script must be updated and redeployed).' }),
         h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { reportsCache = null; load(); } } }));
       else {
-        const all = reportsCache.list.filter((r) => !r.deleted || adminMode());
+        const meL = myLabel();
+        const all = reportsCache.list.filter((r) => (!r.deleted || adminMode()) && (st.scope !== 'mine' || isMine(r, meL)));
         if (st.status === 'Deleted' && !adminMode()) st.status = 'all';
         const statusOk = (r) => st.status === 'all' || (st.status === 'Deleted' ? !!r.deleted : !r.deleted && (st.status === 'Open' ? stOf(r) === 'Open' : stOf(r) !== 'Open'));
         const types = sortedUnique(all.flatMap(typesOf));
@@ -2126,7 +2159,9 @@
         const sel = (id, label, cur, opts, onc, labels) => h('label', { class: 'field' }, h('span', { text: label }),
           h('select', { id, on: { change: (ev) => { onc(ev.target.value); st.limit = 20; paint(); } } },
             opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
+        const nMine = reportsCache.list.filter((r) => (!r.deleted || adminMode()) && isMine(r, meL)).length;
         kids.push(h('div', { class: 'row' },
+          sel('rp-scope', 'Threads', st.scope || 'all', [['all', 'All threads'], ['mine', `My threads (${nMine})`]], (v) => { st.scope = v; }),
           sel('rp-sort', 'Sort by', st.sort, SORTS, (v) => { st.sort = v; }),
           sel('rp-status', 'Status', st.status, [['all', 'All'], ['Open', 'Open'], ['Closed', 'Closed'], ...(adminMode() ? [['Deleted', 'Deleted (admins only)']] : [])], (v) => { st.status = v; }),
           sel('rp-type', 'Type of error', st.type, [['all', 'All'], ...types.map((x) => [x, x])], (v) => { st.type = v; })),
