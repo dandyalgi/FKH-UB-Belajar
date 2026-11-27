@@ -12,6 +12,7 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-27', items: [
+      'Fixed admin edits reverting to the old question text: edits are sealed with a key tied to the bank file’s salt, and re-encrypting the bank changed that salt. The salt is now kept, and edits made under earlier files are opened with their old keys (log in again once).',
       'The question bank is split over several files (bank.enc, bank.2.enc, bank.3.enc) so each stays under GitHub’s 25 MB upload limit. The app joins them automatically.',
       'Added 200 questions: Tryout External 2 UKMPPDH Batch 8 (100) and Tryout External 1 UKMPPDH Batch 50 (100), with explanations and images.',
     ] },
@@ -117,6 +118,16 @@
       base, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
   }
   const importKey = (b64) => crypto.subtle.importKey('raw', b64d(b64), { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+  /** Keys of earlier bank files (their salts are listed in `prev`): admin edits sealed under them stay readable after the bank is re-encrypted. */
+  let oldKeys = [];
+  async function deriveOld(id, password, env) {
+    const out = [];
+    for (const salt of (Array.isArray(env.prev) ? env.prev : []).slice(0, 12)) {
+      if (typeof salt !== 'string' || salt === env.salt) continue;
+      try { out.push(await deriveKey(id, password, { ...env, salt })); } catch (_) { /* skip */ }
+    }
+    return out;
+  }
   async function decryptBank(env, key) {
     let plain;
     try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(env.iv) }, key, b64d(env.ct)); }
@@ -157,7 +168,9 @@
   const sess = {
     get() { try { return window.sessionStorage.getItem(KEYS.key); } catch (_) { return null; } },
     set(v) { try { window.sessionStorage.setItem(KEYS.key, v); } catch (_) { /* login just won't survive a reload */ } },
-    clear() { try { window.sessionStorage.removeItem(KEYS.key); } catch (_) { /* ignore */ } },
+    clear() { try { window.sessionStorage.removeItem(KEYS.key); window.sessionStorage.removeItem(KEYS.key + '.old'); } catch (_) { /* ignore */ } },
+    getOld() { try { return JSON.parse(window.sessionStorage.getItem(KEYS.key + '.old') || '[]'); } catch (_) { return []; } },
+    setOld(v) { try { window.sessionStorage.setItem(KEYS.key + '.old', JSON.stringify(v)); } catch (_) { /* ignore */ } },
   };
   storage.remove(KEYS.key); // earlier versions kept the key in localStorage
 
@@ -516,8 +529,13 @@
   async function openJson(p) {
     try {
       const [iv, ct] = String(p).slice(3).split('.');
-      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, state.key, b64d(ct));
-      return JSON.parse(new TextDecoder().decode(pt));
+      for (const k of [state.key, ...oldKeys]) {
+        try {
+          const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, k, b64d(ct));
+          return JSON.parse(new TextDecoder().decode(pt));
+        } catch (_) { /* try the next key */ }
+      }
+      return null;
     } catch (_) { return null; }
   }
   /** The question with the admin edit applied (ignored if it does not fit the question). */
@@ -1094,7 +1112,7 @@
     const files = [];
     for (let k = 1; k <= n; k++) {
       const ct = env.ct.slice((k - 1) * SIZE, k * SIZE);
-      files.push({ name: partName(k), json: k === 1 ? (n > 1 ? { v: 1, iter: env.iter, salt: env.salt, iv: env.iv, parts: n, set, ct } : env) : { v: 1, part: k, set, ct } });
+      files.push({ name: partName(k), json: k === 1 ? { v: 1, iter: env.iter, salt: env.salt, ...(Array.isArray(state.env.prev) ? { prev: state.env.prev } : {}), iv: env.iv, ...(n > 1 ? { parts: n, set } : {}), ct } : { v: 1, part: k, set, ct } });
     }
     for (const f of files) {
       const url = URL.createObjectURL(new Blob([JSON.stringify(f.json)], { type: 'application/json' }));
@@ -2758,6 +2776,7 @@
 
   function showLogin() {
     state.key = null;
+    oldKeys = [];
     sess.clear();
     state.machine = 'INIT';
     mount(viewLogin());
@@ -2783,6 +2802,9 @@
             await decryptBank(env, key); // throws AuthError when the ID/password is wrong
             state.key = key;
             sess.set(b64e(new Uint8Array(await crypto.subtle.exportKey('raw', key))));
+            btn.textContent = 'Loading…';
+            oldKeys = await deriveOld(id.value, pw.value, env);
+            sess.setOld(await Promise.all(oldKeys.map(async (k) => b64e(new Uint8Array(await crypto.subtle.exportKey('raw', k))))));
             proceed();
           } catch (ex) {
             if (ex instanceof AuthError) fail('Wrong ID or password.');
@@ -2803,7 +2825,7 @@
   (async () => {
     const saved = sess.get();
     if (saved) {
-      try { state.key = await importKey(saved); proceed(); return; }
+      try { state.key = await importKey(saved); oldKeys = await Promise.all(sess.getOld().map(importKey)); proceed(); return; }
       catch (_) { sess.clear(); }
     }
     mount(viewLogin());
