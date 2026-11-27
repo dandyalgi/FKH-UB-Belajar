@@ -12,7 +12,7 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-27', items: [
-      'Fixed admin edits reverting to the old question text: edits are sealed with a key tied to the bank file’s salt, and re-encrypting the bank changed that salt. The salt is now kept, and edits made under earlier files are opened with their old keys (log in again once).',
+      'Fixed admin edits reverting to the old question text: edits are sealed with a key tied to the bank file’s salt, and re-encrypting the bank changed that salt. Admin edits now use their own key that no longer depends on the bank file, so re-encrypting the bank can never hide them again. Edits made under earlier files are opened with their old keys (log in again once).',
       'The question bank is split over several files (bank.enc, bank.2.enc, bank.3.enc) so each stays under GitHub’s 25 MB upload limit. The app joins them automatically.',
       'Added 200 questions: Tryout External 2 UKMPPDH Batch 8 (100) and Tryout External 1 UKMPPDH Batch 50 (100), with explanations and images.',
     ] },
@@ -121,7 +121,8 @@
   /** Keys of earlier bank files (their salts are listed in `prev`): admin edits sealed under them stay readable after the bank is re-encrypted. */
   let oldKeys = [];
   async function deriveOld(id, password, env) {
-    const out = [];
+    // the key for admin edits does not depend on the bank file: it is always first in the list
+    const out = [await deriveKey(id, password, { ...env, salt: b64e(enc.encode('quiz-time-edit-key-v1')) })];
     for (const salt of (Array.isArray(env.prev) ? env.prev : []).slice(0, 12)) {
       if (typeof salt !== 'string' || salt === env.salt) continue;
       try { out.push(await deriveKey(id, password, { ...env, salt })); } catch (_) { /* skip */ }
@@ -523,7 +524,7 @@
   const RKEYS = 'quiz.rkeys.v1';
   async function sealJson(obj) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, state.key, enc.encode(JSON.stringify(obj)));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, oldKeys[0] || state.key, enc.encode(JSON.stringify(obj)));
     return `e1:${b64e(iv)}.${b64e(new Uint8Array(ct))}`;
   }
   async function openJson(p) {
