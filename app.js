@@ -12,6 +12,8 @@
   /** Newest first. Add an entry here whenever the app changes. */
   const CHANGELOG = [
     { date: '2026-11-27', items: [
+      'Threads are now paged: 10 per page, with ‹ › buttons and a box to type a page number.',
+      'The admin question editor can add or remove options up to E (and back down to B).',
       'Fixed admin edits reverting to the old question text: edits are sealed with a key tied to the bank file’s salt, and re-encrypting the bank changed that salt. Admin edits now use their own key that no longer depends on the bank file, so re-encrypting the bank can never hide them again. Edits made under earlier files are opened with their old keys (log in again once).',
       'The question bank is split over several files (bank.enc, bank.2.enc, bank.3.enc) so each stays under GitHub’s 25 MB upload limit. The app joins them automatically.',
       'Added 200 questions: Tryout External 2 UKMPPDH Batch 8 (100) and Tryout External 1 UKMPPDH Batch 50 (100), with explanations and images.',
@@ -542,9 +544,10 @@
   /** The question with the admin edit applied (ignored if it does not fit the question). */
   function remoteOf(q) {
     const e = remote.cur.get(q.id);
-    if (!e || typeof e.question !== 'string' || !e.question.trim() || !Array.isArray(e.options) || e.options.length !== q.options.length
-      || !e.options.every((o) => typeof o === 'string' && o.trim()) || !Number.isInteger(e.correctIndex) || e.correctIndex < 0 || e.correctIndex >= q.options.length) return q;
-    return Object.freeze({ ...q, question: e.question, options: e.options.slice(), correctIndex: e.correctIndex,
+    if (!e || typeof e.question !== 'string' || !e.question.trim() || !Array.isArray(e.options) || e.options.length < 2 || e.options.length > MAX_OPTIONS
+      || !e.options.every((o) => typeof o === 'string' && o.trim()) || !Number.isInteger(e.correctIndex) || e.correctIndex < 0 || e.correctIndex >= e.options.length) return q;
+    const oi = q.optionImages && e.options.length !== q.options.length ? Object.freeze(Array.from({ length: e.options.length }, (_, i) => q.optionImages[i] || '')) : q.optionImages;
+    return Object.freeze({ ...q, ...(q.optionImages ? { optionImages: oi } : {}), question: e.question, options: e.options.slice(), correctIndex: e.correctIndex,
       explanation: typeof e.explanation === 'string' ? e.explanation : q.explanation, aiGenerated: e.aiGenerated === true, remoteEdit: { rev: e.rev, by: e.by, t: e.t } });
   }
   /** One call: am I an admin, and every edit so far. `quiet`: the caller applies the result itself (start-up). */
@@ -621,6 +624,7 @@
       const out = [];
       if (b.question !== n.question) out.push(change('Question', b.question, n.question));
       (n.options || []).forEach((o, i) => { if (b.options && b.options[i] !== o) out.push(change(`Option ${letter(i)}`, b.options[i], o)); });
+      for (let i = (n.options || []).length; i < ((b.options || []).length); i++) out.push(change(`Option ${letter(i)}`, b.options[i], '(removed)'));
       if (b.correctIndex !== n.correctIndex) out.push(change('Answer key', letter(b.correctIndex), letter(n.correctIndex)));
       if ((b.explanation || '') !== (n.explanation || '')) out.push(change('Explanation', b.explanation, n.explanation));
       return out;
@@ -637,9 +641,29 @@
     const close = (changed) => { editingOpen = false; done(changed); };
     const area = (id, v, rows) => { const t = h('textarea', { id, rows: String(rows), maxlength: '4000' }); t.value = v; return t; };
     const qEl = area('ae-q', q.question, 5);
-    const opts = q.options.map((t, i) => { const el = h('input', { type: 'text', id: `ae-o${i}`, maxlength: '600' }); el.value = t; return el; });
-    const sel = h('select', { id: 'ae-correct' }, q.options.map((_, i) => h('option', { value: String(i), text: letter(i) })));
+    const opts = [];
+    const optsBox = h('div', { id: 'ae-opts' });
+    const sel = h('select', { id: 'ae-correct' });
+    const addBtn = h('button', { class: 'btn', type: 'button', id: 'ae-add-opt' });
+    const delBtn = h('button', { class: 'btn', type: 'button', id: 'ae-del-opt' });
+    const paintOpts = () => {
+      const cur = sel.value;
+      optsBox.replaceChildren(...opts.map((el, i) => h('div', {}, h('label', { for: `ae-o${i}`, text: `Option ${letter(i)}` }), el)));
+      sel.replaceChildren(...opts.map((_, i) => h('option', { value: String(i), text: letter(i) })));
+      sel.value = Number(cur) < opts.length ? cur : '0';
+      addBtn.textContent = `+ Add option ${letter(opts.length)}`; addBtn.hidden = opts.length >= MAX_OPTIONS;
+      delBtn.textContent = `Remove option ${letter(opts.length - 1)}`; delBtn.hidden = opts.length <= 2;
+    };
+    const addOpt = (t) => { const el = h('input', { type: 'text', id: `ae-o${opts.length}`, maxlength: '600' }); el.value = t; opts.push(el); return el; };
+    q.options.forEach((t) => addOpt(t));
+    paintOpts();
     sel.value = String(q.correctIndex);
+    addBtn.addEventListener('click', () => { if (opts.length < MAX_OPTIONS) { addOpt('').focus; paintOpts(); opts[opts.length - 1].focus(); } });
+    delBtn.addEventListener('click', () => {
+      if (opts.length <= 2) return;
+      if (Number(sel.value) === opts.length - 1) { show(`Option ${letter(opts.length - 1)} is the correct answer: choose another correct answer first.`); return; }
+      opts.pop(); paintOpts();
+    });
     const ex = area('ae-expl', q.explanation || '', 5);
     const ai = h('input', { id: 'ae-ai', type: 'checkbox', checked: q.aiGenerated });
     const note = h('input', { type: 'text', id: 'ae-note', maxlength: '200', placeholder: 'Reason (optional, shown in the edit history)' });
@@ -668,7 +692,8 @@
     return h('div', { class: 'editor admin-editor', id: 'admin-editor' },
       h('h3', { text: `Edit ${q.id} (saved for everyone)` }),
       h('label', { for: 'ae-q', text: 'Question' }), qEl,
-      opts.map((el, i) => h('div', {}, h('label', { for: `ae-o${i}`, text: `Option ${letter(i)}` }), el)),
+      optsBox,
+      h('div', { class: 'row' }, addBtn, delBtn),
       h('label', { for: 'ae-correct', text: 'Correct answer' }), sel,
       h('label', { for: 'ae-expl', text: 'Explanation' }), ex,
       h('label', { class: 'inline-check' }, ai, 'Still AI-generated (untick once verified)'),
@@ -2077,7 +2102,7 @@
     markSeen(id);
     bellOpen = false;
     state.tab = 'reports'; state.ui = freshUi();
-    state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000, scope: 'all' };
+    state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', page: 1, scope: 'all' };
     pendingScroll = id;
     render(); renderBell();
   }
@@ -2118,7 +2143,7 @@
     return det;
   }
   function viewReports() {
-    const st = state.ui.rep || (state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20, scope: 'all' });
+    const st = state.ui.rep || (state.ui.rep = { status: 'all', type: 'all', query: '', sort: 'new', page: 1, scope: 'all' });
     const card = h('section', { class: 'card', id: 'reports' });
     let marked = false;
     const stOf = (r) => (r.status || '').trim() || 'Open';
@@ -2201,7 +2226,7 @@
         const shown = all.filter((r) => statusOk(r) && (st.type === 'all' || typesOf(r).includes(st.type))
           && (!qq || (r.code + ' ' + r.question + ' ' + r.comment).toLowerCase().includes(qq))).sort(cmp[st.sort] || cmp.new);
         const sel = (id, label, cur, opts, onc, labels) => h('label', { class: 'field' }, h('span', { text: label }),
-          h('select', { id, on: { change: (ev) => { onc(ev.target.value); st.limit = 20; paint(); } } },
+          h('select', { id, on: { change: (ev) => { onc(ev.target.value); st.page = 1; paint(); } } },
             opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
         const nMine = reportsCache.list.filter((r) => (!r.deleted || adminMode()) && isMine(r, meL)).length;
         kids.push(h('div', { class: 'row' },
@@ -2210,14 +2235,26 @@
           sel('rp-status', 'Status', st.status, [['all', 'All'], ['Open', 'Open'], ['Closed', 'Closed'], ...(adminMode() ? [['Deleted', 'Deleted (admins only)']] : [])], (v) => { st.status = v; }),
           sel('rp-type', 'Type of error', st.type, [['all', 'All'], ...types.map((x) => [x, x])], (v) => { st.type = v; })),
           h('label', { class: 'field' }, h('span', { text: 'Search code / question / comment' }),
-            h('input', { id: 'rp-query', type: 'text', value: st.query, autocomplete: 'off', on: { change: (ev) => { st.query = ev.target.value; st.limit = 20; paint(); } } })),
+            h('input', { id: 'rp-query', type: 'text', value: st.query, autocomplete: 'off', on: { change: (ev) => { st.query = ev.target.value; st.page = 1; paint(); } } })),
           h('p', { class: 'muted', id: 'rp-count', role: 'status', text: `${shown.length} of ${all.length} reports.` }));
         freshShown = { ...freshActivity(), ...pinnedFresh };
         const nf = Object.keys(freshShown).length;
         if (nf) kids.push(h('p', { class: 'notice ok', id: 'rp-fresh', role: 'status', text: `🔔 New activity on ${nf} of your report${nf === 1 ? '' : 's'} (marked below).` }));
-        const part = shown.slice(0, st.limit);
+        const PER = 10;
+        const pages = Math.max(1, Math.ceil(shown.length / PER));
+        if (pendingScroll) { const at = shown.findIndex((r) => r.id === pendingScroll); if (at >= 0) st.page = Math.floor(at / PER) + 1; }
+        st.page = Math.min(Math.max(1, Math.floor(Number(st.page)) || 1), pages);
+        const part = shown.slice((st.page - 1) * PER, st.page * PER);
+        const go = (n) => { n = Math.min(Math.max(1, Math.floor(Number(n)) || 1), pages); if (n === st.page) { paint(); return; } st.page = n; paint(); card.scrollIntoView({ block: 'start' }); };
+        const pager = (suffix) => (shown.length > PER ? h('div', { class: 'row pager', role: 'navigation', 'aria-label': 'Pages' },
+          h('button', { class: 'btn', type: 'button', id: `rp-prev${suffix}`, text: '‹', 'aria-label': 'Previous page', disabled: st.page <= 1, on: { click: () => go(st.page - 1) } }),
+          h('span', { class: 'muted', text: 'Page ' }),
+          h('input', { id: `rp-page${suffix}`, type: 'number', min: '1', max: String(pages), value: String(st.page), inputmode: 'numeric', 'aria-label': 'Page number', style: 'width:4.5rem', on: { change: (ev) => go(ev.target.value), keydown: (ev) => { if (ev.key === 'Enter') go(ev.target.value); } } }),
+          h('span', { class: 'muted', text: ` of ${pages}` }),
+          h('button', { class: 'btn', type: 'button', id: `rp-next${suffix}`, text: '›', 'aria-label': 'Next page', disabled: st.page >= pages, on: { click: () => go(st.page + 1) } })) : null);
+        kids.push(pager('-top'));
         kids.push(h('div', { id: 'rp-list' }, part.length ? part.map(reportCard) : h('p', { class: 'muted', text: 'No reports match.' })));
-        if (shown.length > part.length) kids.push(h('div', { class: 'form-actions' }, h('button', { class: 'btn', type: 'button', id: 'rp-more', text: `Show more (${shown.length - part.length} left)`, on: { click: () => { st.limit += 20; paint(); } } })));
+        kids.push(pager(''));
       }
       card.replaceChildren(...kids.filter(Boolean));
       if (pendingScroll && card.querySelector(`[data-report-id="${pendingScroll}"]`)) {
